@@ -1,0 +1,35 @@
+# 1. 首先：忽略所有檔案
+*
+
+# 2. 例外：允許 Git 進入資料夾 (這行很重要，不然 Git 進不去子目錄找 .py)
+!*/
+
+# 3. 例外：允許所有 .py 檔案
+!*.py
+
+# 4. 例外：強烈建議保留的設定檔 (不然別人無法安裝你的環境)
+!.gitignore
+!requirements.txt
+!environment.yml
+!README.md
+!setup.py
+
+# 5. 重要：再次忽略不需要的系統資料夾
+# 因為第 2 步允許了所有資料夾，所以這裡要明確把「垃圾桶」再次忽略
+__pycache__/
+*.egg-info/
+.git/
+.vscode/
+.idea/
+.ipynb_checkpoints/
+CardiacRate/
+
+# ⚠️ 如果你的虛擬環境 (venv/conda) 放在專案資料夾內，請務必在這裡加上它的名字
+# 否則 Git 會掃描環境裡成千上萬個 .py 檔！
+venv/
+# env/
+.venv/
+hf_cache/
+.hf_cache/
+CardiacRate/
+.CardiacRate/

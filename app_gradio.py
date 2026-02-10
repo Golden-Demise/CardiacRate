@@ -3,7 +3,7 @@ import json
 import glob
 import argparse
 import time
-import shutil
+import shutil, hashlib
 import subprocess
 import sys
 
@@ -358,6 +358,69 @@ def answer_from_facts_path(facts_path: str, question: str, max_new_tokens: int, 
     evidence = f"Facts file: {facts_path}\n\n{facts_block}"
     return ans, evidence
 
+def get_ct_store_dir(infer_dir: str):
+    # infer_dir = D:\CardiacRate\dataset\predict  -> dataset_dir = D:\CardiacRate\dataset
+    dataset_dir = os.path.dirname(infer_dir.rstrip("\\/"))
+    return os.path.join(dataset_dir, "ct")
+
+def _strip_nii(name: str):
+    name_l = name.lower()
+    if name_l.endswith(".nii.gz"):
+        return name[:-7]
+    if name_l.endswith(".nii"):
+        return name[:-4]
+    return os.path.splitext(name)[0]
+
+def _is_nii(path: str):
+    p = path.lower()
+    return p.endswith(".nii") or p.endswith(".nii.gz")
+
+def _quick_sig(path: str, nbytes: int = 2 * 1024 * 1024):
+    """fast signature: size + first/last chunk hash (avoid full 100MB hash)"""
+    size = os.path.getsize(path)
+    h = hashlib.md5()
+    h.update(str(size).encode())
+    with open(path, "rb") as f:
+        h.update(f.read(nbytes))
+        if size > nbytes:
+            f.seek(max(0, size - nbytes))
+            h.update(f.read(nbytes))
+    return h.hexdigest()
+
+def ensure_ct_in_store(src_ct: str, infer_dir: str):
+    """Copy uploaded CT to dataset\\ct\\<original_name> (no timestamp). If content differs, overwrite and invalidate cache."""
+    ct_store_dir = get_ct_store_dir(infer_dir)
+    os.makedirs(ct_store_dir, exist_ok=True)
+
+    base = os.path.basename(src_ct)
+    if not _is_nii(base):
+        raise ValueError("Invalid CT file type. Please upload .nii or .nii.gz")
+
+    dst_ct = os.path.join(ct_store_dir, base)
+
+    invalidated = False
+    if os.path.exists(dst_ct):
+        # compare quick signature; if different -> overwrite + invalidate old pred/facts
+        if _quick_sig(src_ct) != _quick_sig(dst_ct):
+            shutil.copyfile(src_ct, dst_ct)
+            invalidated = True
+    else:
+        shutil.copyfile(src_ct, dst_ct)
+
+    case_id = _strip_nii(os.path.basename(dst_ct))
+    return dst_ct, case_id, invalidated
+
+def find_existing_pred(infer_dir: str, case_id: str):
+    """Prefer exact <case>_predict.nii.gz / .nii, else pick newest file starting with case_id in infer_dir."""
+    c1 = os.path.join(infer_dir, f"{case_id}_predict.nii.gz")
+    c2 = os.path.join(infer_dir, f"{case_id}_predict.nii")
+    if os.path.exists(c1): return c1
+    if os.path.exists(c2): return c2
+
+    cand = glob.glob(os.path.join(infer_dir, f"{case_id}*.nii*"))
+    if not cand:
+        return None
+    return max(cand, key=lambda p: os.path.getmtime(p))
 
 def pipeline_new_ct(
     ct_upload,
@@ -383,56 +446,78 @@ def pipeline_new_ct(
     # Copy CT to working dir to avoid Gradio temp path issues
     progress(0.05, desc="Preparing CT file...")
     src = ct_upload.name
-    base = os.path.basename(src)
-    case_id = _strip_nii(base)
-    # Avoid collisions
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    dst_ct = os.path.join(infer_dir, f"{case_id}_{stamp}.nii.gz" if base.endswith(".nii.gz") else f"{case_id}_{stamp}.nii")
-    shutil.copyfile(src, dst_ct)
+    dst_ct, case_id, invalidated = ensure_ct_in_store(src, infer_dir)
+    # expected facts path (fixed name)
+    facts_path = os.path.join(facts_out_dir, f"{case_id}.json")
+
+    # if CT changed -> remove old pred/facts to avoid mismatch
+    if invalidated:
+        old_pred = find_existing_pred(infer_dir, case_id)
+        if old_pred and os.path.exists(old_pred):
+            try: os.remove(old_pred)
+            except: pass
+        if os.path.exists(facts_path):
+            try: os.remove(facts_path)
+            except: pass
+    pred_path = find_existing_pred(infer_dir, case_id)
+    infer_log = ""
 
     # Run segmentation
-    progress(0.25, desc="Running segmentation inference...")
-    infer_py = os.path.join("Segmentation", "infer.py")
-    pred_label_path, infer_stdout = run_segmentation_infer(
-        infer_py=infer_py,
-        model_name=model_name,
-        checkpoint=checkpoint,
-        ct_path=dst_ct,
-        infer_dir=infer_dir
-    )
+    if pred_path and os.path.exists(pred_path):
+        infer_log = f"Reused existing prediction: {pred_path}"
+    else:
+        progress(0.25, desc="Running segmentation inference...")
+        infer_py = os.path.join("Segmentation", "infer.py")
+        pred_path, stdout = run_segmentation_infer(
+            infer_py=infer_py,
+            model_name=model_name,
+            checkpoint=checkpoint,
+            ct_path=dst_ct,
+            infer_dir=infer_dir
+        )
+        infer_log = stdout
+
+        # optional: rename to fixed <case>_predict.ext
+        ext = ".nii.gz" if pred_path.lower().endswith(".nii.gz") else ".nii"
+        fixed_pred = os.path.join(infer_dir, f"{case_id}_predict{ext}")
+        if os.path.abspath(pred_path) != os.path.abspath(fixed_pred):
+            try:
+                if os.path.exists(fixed_pred):
+                    os.remove(fixed_pred)
+                os.replace(pred_path, fixed_pred)
+                pred_path = fixed_pred
+            except:
+                pass
 
     # Build facts
-    progress(0.7, desc="Building facts.json...")
-    out_facts_path = os.path.join(facts_out_dir, f"{_strip_nii(os.path.basename(dst_ct))}.json")
-    facts_obj = make_facts_from_ct_and_label(
-        ct_path=dst_ct,
-        label_path=pred_label_path,
-        out_facts_path=out_facts_path,
-        min_calci_vox=min_calci_vox
-    )
+    progress(0.70, desc="Loading/Building facts.json...")
+    if not os.path.exists(facts_path):
+        make_facts_from_ct_and_label(dst_ct, pred_path, facts_path, min_calci_vox=min_calci_vox)
 
-    progress(1.0, desc="Done.")
+    facts_obj = load_facts_file(facts_path)
     facts_preview = json.dumps(
         {"case_id": facts_obj.get("case_id"), "qc_flags": facts_obj.get("qc_flags"), "derived": facts_obj.get("derived")},
         ensure_ascii=False, indent=2
     )
-    # after facts built
-
-    best_z = pick_best_z_from_valve(pred_label_path)
-
+    # preview images: pick best slice based on valve
+    best_z = pick_best_z_from_valve(pred_path)
     ct_img, ct_info = render_ct_preview(dst_ct, best_z)
-    overlay, ov_info = render_seg_overlay(dst_ct, pred_label_path, best_z)
+    overlay, ov_info = render_seg_overlay(dst_ct, pred_path, best_z)
 
+    # update slider range/value
     ct_vol = _get_cached("ct", dst_ct)
     Z = ct_vol.shape[-1]
     slider_upd = gr.update(minimum=0, maximum=Z-1, value=best_z, step=1, interactive=True)
 
-    # 注意：這裡最後多回傳 overlay_z_state
+    progress(1.0, desc="Done.")
+    status = "OK (reused cache)" if ("Reused existing prediction" in infer_log) else "OK (new inference)"
+
+    # 你自己的 outputs 順序要對齊 UI，我提供一個常見順序：
     return (
-        dst_ct, pred_label_path, out_facts_path, facts_preview, infer_stdout,
+        dst_ct, pred_path, facts_path, facts_preview, infer_log,
         slider_upd, ct_img, ct_info,
         overlay, ov_info,
-        dst_ct, pred_label_path, best_z, ""   # ct_path_state, pred_path_state, overlay_z_state, status
+        best_z, status
     )
 
 def _load_nii_full(path: str):
@@ -515,23 +600,85 @@ def pick_best_z_from_valve(lbl_path: str):
     area = (lbl == 2).sum(axis=(0, 1))
     return int(area.argmax()) if area.max() > 0 else (lbl.shape[-1] // 2)
 
-def on_ct_upload_init(file):
-    if file is None:
-        return (gr.update(interactive=False), None, "", "", "", None, None, "")
-    p = file.name
-    pl = p.lower()
-    # 前端放行 .gz 是為了 .nii.gz，後端這裡再嚴格擋掉
-    if not (pl.endswith(".nii") or pl.endswith(".nii.gz")):
-        return (gr.update(interactive=False), None, "", "", "", None, None, "Invalid file type. Please upload .nii/.nii.gz")
+def on_ct_upload_init_cached(ct_upload, infer_dir, facts_out_dir, min_calci_vox):
+    def empty(status_msg="Please upload a CT."):
+        return (
+            gr.update(interactive=False),  # slider
+            None,                          # CT image
+            "",                            # CT info
+            None,                          # overlay image
+            "",                            # overlay info
+            "",                            # ct_path ✅
+            "",                            # pred path
+            "",                            # facts path
+            "",                            # facts preview
+            status_msg                     # status
+        )
+    
+    if ct_upload is None:
+        return empty("Please upload a CT.")
 
-    ct = _get_cached("ct", p)
+    src = ct_upload.name
+    if src is None:
+        return empty("Please upload a CT.")
+
+    src_l = src.lower()
+    if not (src_l.endswith(".nii") or src_l.endswith(".nii.gz")):
+        return empty("Invalid file type. Please upload .nii/.nii.gz")
+    
+    os.makedirs(infer_dir, exist_ok=True)
+    os.makedirs(facts_out_dir, exist_ok=True)
+
+    dst_ct, case_id, invalidated = ensure_ct_in_store(src, infer_dir)
+    facts_path = os.path.join(facts_out_dir, f"{case_id}.json")
+    pred_path = find_existing_pred(infer_dir, case_id)
+
+    # slider init
+    ct = _get_cached("ct", dst_ct)
     Z = ct.shape[-1]
     z0 = Z // 2
-    img, info = render_ct_preview(p, z0)
-
     slider_upd = gr.update(minimum=0, maximum=Z-1, value=z0, step=1, interactive=True)
-    # 清掉 pred 狀態 & segmentation preview
-    return slider_upd, img, info, p, "", None, None, ""
+
+    # always show CT
+    ct_img, ct_info = render_ct_preview(dst_ct, z0)
+
+    # if pred exists -> show overlay (best_z) and maybe build facts if missing
+    overlay = None
+    ov_info = "No prediction found yet."
+    facts_preview = ""
+    status = ""
+
+    if pred_path and os.path.exists(pred_path):
+        if not os.path.exists(facts_path):
+            make_facts_from_ct_and_label(dst_ct, pred_path, facts_path, min_calci_vox=min_calci_vox)
+
+        best_z = pick_best_z_from_valve(pred_path)
+        slider_upd = gr.update(minimum=0, maximum=Z-1, value=best_z, step=1, interactive=True)
+        ct_img, ct_info = render_ct_preview(dst_ct, best_z)
+        overlay, ov_info = render_seg_overlay(dst_ct, pred_path, best_z)
+
+        if os.path.exists(facts_path):
+            facts_obj = load_facts_file(facts_path)
+            facts_preview = json.dumps(
+                {"case_id": facts_obj.get("case_id"), "qc_flags": facts_obj.get("qc_flags"), "derived": facts_obj.get("derived")},
+                ensure_ascii=False, indent=2
+            )
+        status = "Loaded cached prediction/facts."
+    else:
+        status = "No cached prediction. Click 'Run' to segment."
+
+    return (
+        slider_upd,
+        ct_img,
+        ct_info,
+        overlay,
+        ov_info,
+        dst_ct,              # ✅這行新增：ct_path
+        pred_path or "",
+        facts_path,
+        facts_preview,
+        status
+    )
 
 def on_z_change_update_overlay(z, ct_path, pred_path):
     # 拖 slider 後：更新 CT +（如果已有 pred）更新 overlay
@@ -570,8 +717,8 @@ def main():
     # infer variable
     model_name = "unetcnx_a1"
     checkpoint = r"D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model.pth"
-    infer_dir = r"D:\CardiacRate\Segmentation\infer\predict"
-    facts_out_dir = r"D:\CardiacRate\facts_new"
+    infer_dir = r"D:\CardiacRate\dataset\predict"
+    facts_out_dir = r"D:\CardiacRate\dataset\facts_new"
 
     with gr.Blocks(title="Cardiac Agent (Seg + Facts + LLM)") as demo:
         gr.Markdown("# Cardiac Agent (Segmentation + facts.json + LLM QA)\nAll answers are grounded on facts.json.")
@@ -588,8 +735,6 @@ def main():
                             label="Upload CT (.nii/.nii.gz)",
                             file_types=[".nii", ".gz"]
                         )
-                        ct_path_state = gr.State("")
-                        pred_path_state = gr.State("")
                         overlay_z_state = gr.State(-1)
                         
                         z_slider = gr.Slider(0, 1, value=0, step=1, label="Z slice", interactive=False)
@@ -601,20 +746,6 @@ def main():
 
                         status_box = gr.Textbox(label="Status / Error", interactive=False)
 
-
-                        ct_upload.change(
-                            fn=on_ct_upload_init,  # 你原本的 init 可以保留；但 outputs 要對齊你現在元件
-                            inputs=[ct_upload],
-                            outputs=[z_slider, ct_preview_img, ct_preview_info, ct_path_state, pred_path_state, status_box]
-                        )
-
-                        z_slider.input(
-                            fn=on_z_change_update_overlay,
-                            inputs=[z_slider, ct_path_state, pred_path_state],
-                            outputs=[ct_preview_img, ct_preview_info, seg_overlay_img, overlay_info, overlay_z_state]
-                        )
-
-
                         model_name = gr.Textbox(value="unetcnx_a1", label="Segmentation model_name")
                         checkpoint = gr.Textbox(
                             value=r"D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model.pth",
@@ -622,11 +753,11 @@ def main():
                         )
 
                         infer_dir = gr.Textbox(
-                            value=r"D:\CardiacRate\Segmentation\infer\predict",
+                            value=r"D:\CardiacRate\dataset\predict",
                             label="infer_dir (pred output)"
                         )
                         facts_out_dir = gr.Textbox(
-                            value=r"D:\CardiacRate\facts_new",
+                            value=r"D:\CardiacRate\dataset\facts_new",
                             label="facts_out_dir"
                         )
 
@@ -637,7 +768,6 @@ def main():
 
                         run_btn = gr.Button("Run Segmentation + Build facts.json", variant="primary")
 
-
                         out_ct_path = gr.Textbox(label="Saved CT path", interactive=False)
                         out_pred_path = gr.Textbox(label="Pred label path", interactive=False)
                         out_facts_path = gr.Textbox(label="facts.json path", interactive=False)
@@ -646,6 +776,29 @@ def main():
                         with gr.Accordion("Debug / Preview", open=False):
                             out_facts_preview = gr.Textbox(label="facts preview (derived)", lines=10)
                             out_infer_log = gr.Textbox(label="infer.py STDOUT (debug)", lines=10)
+                        
+                        ct_upload.change(
+                            fn=on_ct_upload_init_cached,
+                            inputs=[ct_upload, infer_dir, facts_out_dir, min_calci_vox],
+                            outputs=[
+                                z_slider,
+                                ct_preview_img,
+                                ct_preview_info,
+                                seg_overlay_img,
+                                overlay_info,
+                                out_ct_path,        # ✅新增
+                                out_pred_path,
+                                out_facts_path,
+                                out_facts_preview,
+                                status_box
+                            ]
+                        )
+
+                        z_slider.change(
+                            fn=on_z_change_update_overlay,
+                            inputs=[z_slider, out_ct_path, out_pred_path],
+                            outputs=[ct_preview_img, ct_preview_info, seg_overlay_img, overlay_info, overlay_z_state]
+                        )
 
                         run_btn.click(
                             fn=pipeline_new_ct,
@@ -654,7 +807,7 @@ def main():
                                 out_ct_path, out_pred_path, out_facts_path, out_facts_preview, out_infer_log,
                                 z_slider, ct_preview_img, ct_preview_info,
                                 seg_overlay_img, overlay_info,
-                                ct_path_state, pred_path_state, overlay_z_state, status_box
+                                overlay_z_state, status_box
                             ]
                         )
 

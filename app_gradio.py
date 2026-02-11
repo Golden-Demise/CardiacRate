@@ -30,7 +30,8 @@ LABEL_MAP = {
 SYSTEM = (
     "You are a cardiac assistant. Answer in English. "
     "Use ONLY the provided FACTS. If the answer is not available in FACTS, "
-    "reply exactly: Not available in provided facts."
+    "reply exactly: Not available in provided facts. "
+    "Do NOT repeat the prompt, FACTS, or dialogue. Output only the answer."
 )
 
 MODEL = None
@@ -42,7 +43,6 @@ _VOL_CACHE = {"ct": None, "lbl": None}
 def load_facts_file(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
-
 
 def build_facts_block(facts_obj: dict, derived_only: bool = True) -> str:
     """Keep it short to reduce hallucination."""
@@ -56,7 +56,6 @@ def build_facts_block(facts_obj: dict, derived_only: bool = True) -> str:
         payload = facts_obj
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
-
 def build_prompt(facts_block: str, question: str) -> str:
     return (
         f"### SYSTEM\n{SYSTEM}\n\n"
@@ -64,7 +63,6 @@ def build_prompt(facts_block: str, question: str) -> str:
         f"### QUESTION\n{question}\n\n"
         f"### ANSWER\n"
     )
-
 
 @torch.no_grad()
 def generate_answer(prompt: str, max_new_tokens: int = 128, temperature: float = 0.0, top_p: float = 1.0):
@@ -82,7 +80,6 @@ def generate_answer(prompt: str, max_new_tokens: int = 128, temperature: float =
     if "### ANSWER" in text:
         return text.split("### ANSWER", 1)[-1].strip()
     return text.strip()
-
 
 def answer_from_case(case_id: str, question: str, max_new_tokens: int, temperature: float, top_p: float, derived_only: bool):
     if not question or not question.strip():
@@ -167,27 +164,22 @@ def _strip_nii(name: str):
         return name[:-4]
     return os.path.splitext(name)[0]
 
-
 def voxel_volume_mm3(spacing_xyz):
     sx, sy, sz = spacing_xyz
     return float(sx * sy * sz)
 
-
 def to_dhw_shape(shape_xyz):
     x, y, z = shape_xyz
     return [int(z), int(y), int(x)]
-
 
 def compute_bbox(indices_xyz):
     x, y, z = indices_xyz
     return [[int(z.min()), int(y.min()), int(x.min())],
             [int(z.max()), int(y.max()), int(x.max())]]
 
-
 def compute_centroid(indices_xyz):
     x, y, z = indices_xyz
     return [float(z.mean()), float(y.mean()), float(x.mean())]
-
 
 def connected_components_stats(mask: np.ndarray, spacing_xyz):
     if mask.sum() == 0:
@@ -203,7 +195,6 @@ def connected_components_stats(mask: np.ndarray, spacing_xyz):
     largest_vox = int(counts.max())
     largest_mm3 = float(largest_vox * voxel_volume_mm3(spacing_xyz))
     return int(num), largest_mm3
-
 
 def make_facts_from_ct_and_label(ct_path: str, label_path: str, out_facts_path: str, min_calci_vox: int = 20):
     ct_img = nib.load(ct_path)
@@ -302,7 +293,6 @@ def make_facts_from_ct_and_label(ct_path: str, label_path: str, out_facts_path: 
 
     return facts
 
-
 def run_segmentation_infer(
     infer_py: str,
     model_name: str,
@@ -343,20 +333,6 @@ def run_segmentation_infer(
             raise RuntimeError(f"infer.py finished but no nii/nii.gz found in {infer_dir}\nSTDOUT:\n{proc.stdout}")
         pred = max(all_files, key=lambda p: os.path.getmtime(p))
         return pred, proc.stdout
-
-
-def answer_from_facts_path(facts_path: str, question: str, max_new_tokens: int, temperature: float, top_p: float, derived_only: bool):
-    if not facts_path or not os.path.exists(facts_path):
-        return "", "facts.json not found. Please run segmentation + facts first."
-    if not question or not question.strip():
-        return "", "Please enter a question."
-
-    facts_obj = load_facts_file(facts_path)
-    facts_block = build_facts_block(facts_obj, derived_only=derived_only)
-    prompt = build_prompt(facts_block, question)
-    ans = generate_answer(prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p)
-    evidence = f"Facts file: {facts_path}\n\n{facts_block}"
-    return ans, evidence
 
 def get_ct_store_dir(infer_dir: str):
     # infer_dir = D:\CardiacRate\dataset\predict  -> dataset_dir = D:\CardiacRate\dataset
@@ -593,7 +569,6 @@ def render_seg_overlay(ct_path: str, lbl_path: str, z: int):
     info = f"Overlay z={z}/{Z-1} (myocardium=Green,aortic_valve=Yellow,aortic_valve_calcification=Red)"
     return overlay, info
 
-
 def pick_best_z_from_valve(lbl_path: str):
     lbl = _get_cached("lbl", lbl_path)
     # 找 valve(label==2) 面積最大的那層
@@ -694,6 +669,90 @@ def on_z_change_update_overlay(z, ct_path, pred_path):
     else:
         return ct_img, ct_info, None, "Run segmentation first to generate prediction.", -1
 
+def build_chat_prompt(facts_block: str, history_messages, user_msg: str, keep_last_k: int = 4) -> str:
+    turns = messages_to_turns(history_messages)
+    turns = turns[-keep_last_k:] if turns else []
+
+    dialogue = ""
+    for u, a in turns:
+        dialogue += f"User: {u}\nAssistant: {a}\n"
+    dialogue += f"User: {user_msg}\nAssistant:"
+
+    return (
+        f"### SYSTEM\n{SYSTEM}\n\n"
+        f"### FACTS\n{facts_block}\n\n"
+        f"### DIALOGUE\n{dialogue}\n"
+    )
+
+@torch.no_grad()
+def generate_chat(prompt: str, max_new_tokens: int = 128, temperature: float = 0.0, top_p: float = 1.0) -> str:
+    inputs = TOKENIZER(prompt, return_tensors="pt").to(DEVICE)
+    input_len = inputs["input_ids"].shape[-1]
+
+    out = MODEL.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        do_sample=(temperature > 0.0),
+        temperature=max(temperature, 1e-6),
+        top_p=top_p,
+        pad_token_id=TOKENIZER.eos_token_id,
+        eos_token_id=TOKENIZER.eos_token_id,
+    )
+
+    gen_ids = out[0][input_len:]  # ✅只取新生成的 token
+    ans = TOKENIZER.decode(gen_ids, skip_special_tokens=True).strip()
+
+    # 防止模型接著吐出下一輪
+    for stop in ["\nUser:", "\n###", "User:", "###"]:
+        if stop in ans:
+            ans = ans.split(stop, 1)[0].strip()
+
+    return ans
+
+def messages_to_turns(history_messages):
+    """Convert Gradio 'messages' history -> list[(user, assistant)] for prompt building."""
+    turns = []
+    pending_user = None
+    for m in history_messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "user":
+            pending_user = content
+        elif role == "assistant":
+            if pending_user is not None:
+                turns.append((pending_user, content))
+                pending_user = None
+    return turns
+
+def chat_respond(user_msg, history, facts_path, max_new_tokens, temperature, top_p, derived_only):
+    history = history or []
+    user_msg = (user_msg or "").strip()
+    if not user_msg:
+        return history, ""
+
+    if (not facts_path) or (not os.path.exists(facts_path)):
+        history = history + [
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": "No facts loaded. Upload a CT and run segmentation (or load cached facts) first."}
+        ]
+        return history, ""
+
+    facts_obj = load_facts_file(facts_path)
+    facts_block = build_facts_block(facts_obj, derived_only=derived_only)
+
+    prompt = build_chat_prompt(facts_block, history, user_msg, keep_last_k=4)
+    print("Prompt：", prompt)
+    ans = generate_chat(prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p)
+    print("Ans：", ans)
+
+    history = history + [
+        {"role": "user", "content": user_msg},
+        {"role": "assistant", "content": ans}
+    ]
+    print("History：", history)
+    return history, ""
 
 def main():
     ap = argparse.ArgumentParser()
@@ -814,33 +873,41 @@ def main():
 
                     # RIGHT: (2) Ask questions — larger
                     with gr.Column(scale=2, min_width=520):
-                        gr.Markdown("## 2) Ask questions (grounded on the generated facts.json)")
+                        gr.Markdown("## 2) Chat (grounded on the generated facts.json)")
 
-                        q = gr.Textbox(
-                            label="Question (English)",
-                            placeholder="e.g., Is aortic valve calcification present?"
+                        chatbot = gr.Chatbot(label="Chat", height=520)
+                        user_msg = gr.Textbox(
+                            label="Message (English)",
+                            placeholder="Ask anything about this case (grounded on facts.json)...",
+                            lines=2
                         )
+
+                        with gr.Row():
+                            send_btn = gr.Button("Send", variant="primary")
+                            clear_btn = gr.Button("Clear chat")
 
                         with gr.Row():
                             max_new = gr.Slider(32, 512, value=128, step=8, label="max_new_tokens")
                             temp = gr.Slider(0.0, 1.0, value=0.0, step=0.05, label="temperature (0 = deterministic)")
                             top_p = gr.Slider(0.1, 1.0, value=1.0, step=0.05, label="top_p")
-
                         derived_only = gr.Checkbox(value=True, label="Use derived-only facts (recommended)")
-                        ask_btn = gr.Button("Answer", variant="primary")
 
-                        ans = gr.Textbox(label="Answer", lines=6)
-                        ev = gr.Textbox(label="Evidence (facts used)", lines=14)
-
-                        ask_btn.click(
-                            fn=answer_from_facts_path,
-                            inputs=[out_facts_path, q, max_new, temp, top_p, derived_only],
-                            outputs=[ans, ev]
+                        send_btn.click(
+                            fn=chat_respond,
+                            inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only],
+                            outputs=[chatbot, user_msg]
                         )
 
+                        # Enter 送出
+                        user_msg.submit(
+                            fn=chat_respond,
+                            inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only],
+                            outputs=[chatbot, user_msg]
+                        )
+
+                        clear_btn.click(lambda: [], outputs=[chatbot])
 
         demo.launch(share=args.share)
-
 
 if __name__ == "__main__":
     main()

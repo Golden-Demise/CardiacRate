@@ -680,7 +680,6 @@ def generate_chat(prompt: str, max_new_tokens: int = 128, temperature: float = 0
 
     return ans
 
-
 def chat_respond(user_msg, history, facts_path, max_new_tokens, temperature, top_p, derived_only):
     history = history or []
     user_msg = (user_msg or "").strip()

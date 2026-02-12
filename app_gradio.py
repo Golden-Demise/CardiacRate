@@ -2,7 +2,6 @@ import os
 import json
 import glob
 import argparse
-import time
 import shutil, hashlib
 import subprocess
 import sys
@@ -81,42 +80,6 @@ def generate_answer(prompt: str, max_new_tokens: int = 128, temperature: float =
         return text.split("### ANSWER", 1)[-1].strip()
     return text.strip()
 
-def answer_from_case(case_id: str, question: str, max_new_tokens: int, temperature: float, top_p: float, derived_only: bool):
-    if not question or not question.strip():
-        return "", "Please enter a question."
-
-    if case_id not in FACTS_INDEX:
-        return "", "Case not found."
-
-    facts_path = FACTS_INDEX[case_id]
-    facts_obj = load_facts_file(facts_path)
-    facts_block = build_facts_block(facts_obj, derived_only=derived_only)
-    prompt = build_prompt(facts_block, question)
-
-    ans = generate_answer(prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p)
-
-    # Show evidence snippet (facts block) for transparency
-    evidence = f"Facts file: {facts_path}\n\n{facts_block}"
-    return ans, evidence
-
-
-def answer_from_upload(upload_file, question: str, max_new_tokens: int, temperature: float, top_p: float, derived_only: bool):
-    if not question or not question.strip():
-        return "", "Please enter a question."
-
-    if upload_file is None:
-        return "", "Please upload a facts.json file."
-
-    facts_obj = load_facts_file(upload_file.name)
-    facts_block = build_facts_block(facts_obj, derived_only=derived_only)
-    prompt = build_prompt(facts_block, question)
-
-    ans = generate_answer(prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p)
-
-    evidence = f"Uploaded: {upload_file.name}\n\n{facts_block}"
-    return ans, evidence
-
-
 def build_index(facts_dir: str):
     idx = {}
     paths = sorted(glob.glob(os.path.join(facts_dir, "*.json")))
@@ -128,7 +91,6 @@ def build_index(facts_dir: str):
         except Exception:
             pass
     return idx
-
 
 def load_model(base_model: str, lora_dir: str, cache_dir: str, trust_remote_code: bool):
     global MODEL, TOKENIZER, DEVICE
@@ -156,13 +118,6 @@ def load_model(base_model: str, lora_dir: str, cache_dir: str, trust_remote_code
     MODEL.eval()
     if DEVICE == "cpu":
         MODEL.to("cpu")
-
-def _strip_nii(name: str):
-    if name.endswith(".nii.gz"):
-        return name[:-7]
-    if name.endswith(".nii"):
-        return name[:-4]
-    return os.path.splitext(name)[0]
 
 def voxel_volume_mm3(spacing_xyz):
     sx, sy, sz = spacing_xyz
@@ -533,7 +488,6 @@ def render_ct_preview(ct_path: str, z: int = None):
     sl = np.rot90(sl, k=3)  # clockwise 90°
     return sl, f"CT shape={ct.shape}, z={z}/{Z-1}"
 
-
 def render_seg_overlay(ct_path: str, lbl_path: str, z: int):
     ct = _get_cached("ct", ct_path)
     lbl = _get_cached("lbl", lbl_path)
@@ -669,6 +623,23 @@ def on_z_change_update_overlay(z, ct_path, pred_path):
     else:
         return ct_img, ct_info, None, "Run segmentation first to generate prediction.", -1
 
+def messages_to_turns(history_messages):
+    """Convert Gradio 'messages' history -> list[(user, assistant)] for prompt building."""
+    turns = []
+    pending_user = None
+    for m in history_messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "user":
+            pending_user = content
+        elif role == "assistant":
+            if pending_user is not None:
+                turns.append((pending_user, content))
+                pending_user = None
+    return turns
+
 def build_chat_prompt(facts_block: str, history_messages, user_msg: str, keep_last_k: int = 4) -> str:
     turns = messages_to_turns(history_messages)
     turns = turns[-keep_last_k:] if turns else []
@@ -709,22 +680,6 @@ def generate_chat(prompt: str, max_new_tokens: int = 128, temperature: float = 0
 
     return ans
 
-def messages_to_turns(history_messages):
-    """Convert Gradio 'messages' history -> list[(user, assistant)] for prompt building."""
-    turns = []
-    pending_user = None
-    for m in history_messages or []:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        content = m.get("content", "")
-        if role == "user":
-            pending_user = content
-        elif role == "assistant":
-            if pending_user is not None:
-                turns.append((pending_user, content))
-                pending_user = None
-    return turns
 
 def chat_respond(user_msg, history, facts_path, max_new_tokens, temperature, top_p, derived_only):
     history = history or []

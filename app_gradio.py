@@ -5,13 +5,13 @@ import argparse
 import shutil, hashlib
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
 import gradio as gr
 
 import nibabel as nib
-
 try:
     from scipy.ndimage import label as cc_label
 except Exception:
@@ -27,10 +27,16 @@ LABEL_MAP = {
 }
 
 SYSTEM = (
-    "You are a cardiac assistant. Answer in English. "
-    "Use ONLY the provided FACTS. If the answer is not available in FACTS, "
-    "reply exactly: Not available in provided facts. "
-    "Do NOT repeat the prompt, FACTS, or dialogue. Output only the answer."
+    "You are a cardiac CT assistant. Answer in English. "
+    "Use ONLY the provided FACTS. "
+    "Do not use external medical knowledge. "
+    "Do not invent unsupported findings. "
+    "If the answer is not available in FACTS, reply exactly: "
+    "\"Not available in provided facts.\" "
+    "When answering numeric questions, convert the relevant FACTS into a concise natural-language sentence. "
+    "Do not output raw JSON, Python dictionaries, key-value pairs, or code. "
+    "Do not repeat the prompt, FACTS, or dialogue. "
+    "Output only the final answer."
 )
 
 MODEL = None
@@ -44,15 +50,36 @@ def load_facts_file(path: str):
         return json.load(f)
 
 def build_facts_block(facts_obj: dict, derived_only: bool = True) -> str:
-    """Keep it short to reduce hallucination."""
-    if derived_only:
-        payload = {
-            "case_id": facts_obj.get("case_id", ""),
-            "qc_flags": facts_obj.get("qc_flags", []),
-            "derived": facts_obj.get("derived", {})
-        }
-    else:
-        payload = facts_obj
+    """
+    Build a compact but complete facts block for LLM-based QA.
+    Even when derived_only=True, keep structures because many QA questions
+    require volume, slice range, bbox, and centroid.
+    """
+
+    case_id = facts_obj.get("case_id") or facts_obj.get("patient_id", "")
+
+    payload = {
+        "case_id": case_id,
+        "patient_id": facts_obj.get("patient_id", case_id),
+        "modality": facts_obj.get("modality", "cardiac_ct"),
+
+        # Support both old and new make_facts.py formats
+        "image_info": facts_obj.get("image_info", {}),
+        "image_shape": facts_obj.get("image_shape", None),
+        "spacing_mm": facts_obj.get("spacing_mm", None),
+
+        # Most important for QA
+        "structures": facts_obj.get("structures", {}),
+
+        # Support both schema names
+        "derived": facts_obj.get("derived", {}),
+        "derived_metrics": facts_obj.get("derived_metrics", {}),
+
+        "answerable_findings": facts_obj.get("answerable_findings", {}),
+        "limitations": facts_obj.get("limitations", []),
+        "qc_flags": facts_obj.get("qc_flags", []),
+    }
+
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 def build_prompt(facts_block: str, question: str) -> str:
@@ -151,100 +178,83 @@ def connected_components_stats(mask: np.ndarray, spacing_xyz):
     largest_mm3 = float(largest_vox * voxel_volume_mm3(spacing_xyz))
     return int(num), largest_mm3
 
-def make_facts_from_ct_and_label(ct_path: str, label_path: str, out_facts_path: str, min_calci_vox: int = 20):
-    ct_img = nib.load(ct_path)
-    spacing_xyz = ct_img.header.get_zooms()[:3]
+def make_facts_from_ct_and_label(
+    ct_path: str,
+    label_path: str,
+    out_facts_path: str,
+    min_calci_vox: int = 20,
+):
+    """
+    Execute make_facts.py to generate facts.json, then read and return it.
 
-    lbl_img = nib.load(label_path)
-    lbl = lbl_img.get_fdata().astype(np.int16)
+    Args:
+        ct_path:
+            Original CT image path.
+        label_path:
+            Segmentation label / prediction mask path.
+        out_facts_path:
+            Output facts.json path.
+        min_calci_vox:
+            Kept for compatibility with the old function.
+            Note: current make_facts.py does not use this argument unless you add it there.
 
-    qc_flags = []
-    if lbl.shape != ct_img.shape:
-        qc_flags.append("shape_mismatch_ct_label")
+    Returns:
+        facts: dict
+    """
 
-    vvox = voxel_volume_mm3(spacing_xyz)
-    case_id = _strip_nii(os.path.basename(ct_path))
+    ct_path = str(Path(ct_path))
+    label_path = str(Path(label_path))
+    out_facts_path = str(Path(out_facts_path))
 
-    facts = {
-        "schema_version": "1.0",
-        "case_id": case_id,
-        "modality": "CT",
-        "image_path": ct_path.replace("\\", "/"),
-        "label_path": label_path.replace("\\", "/"),
-        "shape_dhw": to_dhw_shape(lbl.shape),
-        "spacing_mm": [float(spacing_xyz[0]), float(spacing_xyz[1]), float(spacing_xyz[2])],
-        "labels": {str(k): v for k, v in LABEL_MAP.items()},
-        "structures": {},
-        "derived": {},
-        "prompts": [],
-        "qc_flags": qc_flags,
-    }
+    # 假設 make_facts.py 跟目前執行的 script 放在同一個資料夾
+    current_dir = Path(__file__).resolve().parent
+    make_facts_script = current_dir / "make_facts.py"
 
-    for lid, name in LABEL_MAP.items():
-        mask = (lbl == lid)
-        vox = int(mask.sum())
-        vol_mm3 = float(vox * vvox)
-        vol_ml = float(vol_mm3 / 1000.0)
+    if not make_facts_script.exists():
+        raise FileNotFoundError(f"make_facts.py not found: {make_facts_script}")
 
-        st = {
-            "present": bool(vox > 0),
-            "voxel_count": vox,
-            "volume_mm3": vol_mm3,
-            "volume_ml": vol_ml
-        }
+    if not Path(ct_path).exists():
+        raise FileNotFoundError(f"CT file not found: {ct_path}")
 
-        if vox > 0:
-            idx = np.where(mask)
-            st["centroid_voxel"] = compute_centroid(idx)
-            st["bbox_voxel"] = compute_bbox(idx)
+    if not Path(label_path).exists():
+        raise FileNotFoundError(f"Label file not found: {label_path}")
 
-        if name == "aortic_valve_calcification":
-            num_cc, largest_mm3 = connected_components_stats(mask, spacing_xyz)
-            st["num_connected_components"] = num_cc
-            st["largest_component_mm3"] = largest_mm3
+    out_dir = Path(out_facts_path).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        facts["structures"][name] = st
+    cmd = [
+        sys.executable,
+        str(make_facts_script),
+        "--mask_path",
+        label_path,
+        "--image_path",
+        ct_path,
+        "--out_path",
+        out_facts_path,
+    ]
 
-    # threshold calcification tiny noise
-    calci = facts["structures"]["aortic_valve_calcification"]
-    if 0 < calci["voxel_count"] < min_calci_vox:
-        facts["qc_flags"].append("calcification_below_threshold")
-        calci["present"] = False
-        calci["voxel_count"] = 0
-        calci["volume_mm3"] = 0.0
-        calci["volume_ml"] = 0.0
-        calci["num_connected_components"] = 0
-        calci["largest_component_mm3"] = 0.0
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
 
-    valve = facts["structures"]["aortic_valve"]
-    if valve["voxel_count"] == 0:
-        facts["qc_flags"].append("empty_aortic_valve")
-        if calci["present"]:
-            facts["qc_flags"].append("inconsistent_calci_without_valve")
+    if result.returncode != 0:
+        raise RuntimeError(
+            "make_facts.py failed.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
 
-    if len(facts["qc_flags"]) == 0:
-        facts["qc_flags"].append("ok")
+    if not Path(out_facts_path).exists():
+        raise FileNotFoundError(
+            f"make_facts.py finished, but output facts file was not found: {out_facts_path}"
+        )
 
-    facts["derived"] = {
-        "myocardium_volume_ml": float(facts["structures"]["myocardium"]["volume_ml"]),
-        "aortic_valve_volume_ml": float(valve["volume_ml"]),
-        "calcification_present": bool(calci["present"]),
-        "calcification_volume_mm3": float(calci["volume_mm3"] if calci["present"] else 0.0),
-        "calcification_volume_ml": float(calci["volume_ml"] if calci["present"] else 0.0),
-        "calcification_to_valve_ratio": float((calci["volume_mm3"] if calci["present"] else 0.0) / max(valve["volume_mm3"], 1e-6))
-    }
-
-    # store a bbox prompt for valve (optional)
-    if "bbox_voxel" in valve:
-        facts["prompts"].append({
-            "type": "bbox",
-            "target": "aortic_valve",
-            "prompt_bbox_voxel": valve["bbox_voxel"]
-        })
-
-    os.makedirs(os.path.dirname(out_facts_path), exist_ok=True)
-    with open(out_facts_path, "w", encoding="utf-8") as f:
-        json.dump(facts, f, ensure_ascii=False, indent=2)
+    with open(out_facts_path, "r", encoding="utf-8") as f:
+        facts = json.load(f)
 
     return facts
 
@@ -369,7 +379,7 @@ def pipeline_new_ct(
     """
     if ct_upload is None:
         return "", "", "", "", "Please upload a CT (.nii/.nii.gz)."
-
+ 
     # Make sure paths exist
     os.makedirs(infer_dir, exist_ok=True)
     os.makedirs(facts_out_dir, exist_ok=True)
@@ -640,19 +650,27 @@ def messages_to_turns(history_messages):
                 pending_user = None
     return turns
 
-def build_chat_prompt(facts_block: str, history_messages, user_msg: str, keep_last_k: int = 4) -> str:
+def build_chat_prompt(facts_block: str, history_messages, user_msg: str, keep_last_k: int = 2) -> str:
     turns = messages_to_turns(history_messages)
     turns = turns[-keep_last_k:] if turns else []
 
-    dialogue = ""
+    history_text = ""
     for u, a in turns:
-        dialogue += f"User: {u}\nAssistant: {a}\n"
-    dialogue += f"User: {user_msg}\nAssistant:"
+        history_text += f"Previous Question: {u}\nPrevious Answer: {a}\n\n"
 
     return (
-        f"### SYSTEM\n{SYSTEM}\n\n"
-        f"### FACTS\n{facts_block}\n\n"
-        f"### DIALOGUE\n{dialogue}\n"
+        f"### System:\n"
+        f"{SYSTEM}\n\n"
+        f"### User:\n"
+        f"{history_text}"
+        f"Question:\n"
+        f"{user_msg}\n\n"
+        f"FACTS:\n"
+        f"{facts_block}\n\n"
+        f"Instruction:\n"
+        f"Answer the question using only the FACTS. "
+        f"Write a natural-language answer. Do not output raw JSON or dictionaries.\n\n"
+        f"### Assistant:\n"
     )
 
 @torch.no_grad()
@@ -668,15 +686,28 @@ def generate_chat(prompt: str, max_new_tokens: int = 128, temperature: float = 0
         top_p=top_p,
         pad_token_id=TOKENIZER.eos_token_id,
         eos_token_id=TOKENIZER.eos_token_id,
+        repetition_penalty=1.05,
     )
 
-    gen_ids = out[0][input_len:]  # ✅只取新生成的 token
+    gen_ids = out[0][input_len:]
     ans = TOKENIZER.decode(gen_ids, skip_special_tokens=True).strip()
 
-    # 防止模型接著吐出下一輪
-    for stop in ["\nUser:", "\n###", "User:", "###"]:
+    stop_tokens = [
+        "\n###",
+        "\nUser:",
+        "\nQuestion:",
+        "\nFACTS:",
+        "### User:",
+        "### System:",
+        "### Assistant:",
+    ]
+
+    for stop in stop_tokens:
         if stop in ans:
             ans = ans.split(stop, 1)[0].strip()
+
+    # Optional cleanup
+    ans = ans.strip()
 
     return ans
 
@@ -731,7 +762,7 @@ def main():
     model_name = "unetcnx_a1"
     checkpoint = r"D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model.pth"
     infer_dir = r"D:\CardiacRate\dataset\predict"
-    facts_out_dir = r"D:\CardiacRate\dataset\facts_new"
+    facts_out_dir = args.facts_dir
 
     with gr.Blocks(title="Cardiac Agent (Seg + Facts + LLM)") as demo:
         gr.Markdown("# Cardiac Agent (Segmentation + facts.json + LLM QA)\nAll answers are grounded on facts.json.")
@@ -770,7 +801,7 @@ def main():
                             label="infer_dir (pred output)"
                         )
                         facts_out_dir = gr.Textbox(
-                            value=r"D:\CardiacRate\dataset\facts_new",
+                            value=facts_out_dir,
                             label="facts_out_dir"
                         )
 
@@ -844,8 +875,8 @@ def main():
                             max_new = gr.Slider(32, 512, value=128, step=8, label="max_new_tokens")
                             temp = gr.Slider(0.0, 1.0, value=0.0, step=0.05, label="temperature (0 = deterministic)")
                             top_p = gr.Slider(0.1, 1.0, value=1.0, step=0.05, label="top_p")
-                        derived_only = gr.Checkbox(value=True, label="Use derived-only facts (recommended)")
-
+                        derived_only = gr.Checkbox(value=False, label="Use compact facts only")
+                        
                         send_btn.click(
                             fn=chat_respond,
                             inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only],

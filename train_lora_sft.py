@@ -82,33 +82,6 @@ def main():
         report_to="none",
         max_length=args.max_seq_len,          # 取代 max_seq_length / max_seq_len 舊寫法
     )
-    # sft_args = SFTConfig(
-    #     output_dir=args.out_dir,
-
-    #     # ---- training basics
-    #     per_device_train_batch_size=args.batch_size,
-    #     gradient_accumulation_steps=args.grad_accum,
-    #     learning_rate=args.lr,
-    #     num_train_epochs=args.epochs,
-
-    #     # ---- IMPORTANT: Windows 上先鎖死 worker / proc，避免像卡住
-    #     dataset_num_proc=1,            # ✅ dataset 前處理不要多進程
-    #     dataloader_num_workers=0,      # ✅ dataloader 不要開 worker
-
-    #     # ---- make it "visibly moving"
-    #     logging_first_step=True,
-    #     logging_steps=1,
-
-    #     # ---- smoke test: 先不要 eval/save（避免額外等待）
-    #     eval_strategy="no",
-    #     save_strategy="no",
-
-    #     # ---- sequence length (TRL 新版用 max_length)  :contentReference[oaicite:1]{index=1}
-    #     max_length=args.max_seq_len,
-
-    #     # ---- smoke test: 先跑很少步數確認會動
-    #     max_steps=10,                  # ✅ 先確認能跑到 10/10
-    # )
 
     trainer = SFTTrainer(
         model=model,

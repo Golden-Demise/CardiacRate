@@ -1,14 +1,11 @@
 import os
 import json
 import argparse
-import numpy as np
+from pathlib import Path
 
+import numpy as np
 import nibabel as nib
 
-try:
-    from scipy.ndimage import label as cc_label
-except Exception:
-    cc_label = None
 
 LABEL_MAP = {
     1: "myocardium",
@@ -16,187 +13,221 @@ LABEL_MAP = {
     3: "aortic_valve_calcification",
 }
 
-def voxel_volume_mm3(spacing_xyz):
-    sx, sy, sz = spacing_xyz
-    return float(sx * sy * sz)
 
-def to_dhw_shape(shape_xyz):
-    # NIfTI commonly loads as (X,Y,Z); we report (D,H,W)=(Z,Y,X)
-    x, y, z = shape_xyz
-    return [int(z), int(y), int(x)]
+def get_patient_id(path: str) -> str:
+    name = Path(path).name
 
-def compute_bbox(indices_xyz):
-    x, y, z = indices_xyz
-    return [[int(z.min()), int(y.min()), int(x.min())],
-            [int(z.max()), int(y.max()), int(x.max())]]
-
-def compute_centroid(indices_xyz):
-    x, y, z = indices_xyz
-    return [float(z.mean()), float(y.mean()), float(x.mean())]  # D,H,W order
-
-def connected_components_stats(mask: np.ndarray, spacing_xyz):
-    if mask.sum() == 0:
-        return 0, 0.0
-    if cc_label is None:
-        # fallback: treat as one component
-        largest_mm3 = float(mask.sum() * voxel_volume_mm3(spacing_xyz))
-        return 1, largest_mm3
-
-    labeled, num = cc_label(mask.astype(np.uint8))
-    if num == 0:
-        return 0, 0.0
-    counts = np.bincount(labeled.ravel())
-    counts[0] = 0
-    largest_vox = int(counts.max())
-    largest_mm3 = float(largest_vox * voxel_volume_mm3(spacing_xyz))
-    return int(num), largest_mm3
-
-def strip_nii_gz(name: str):
-    # patient_0001.nii.gz -> patient_0001
     if name.endswith(".nii.gz"):
-        return name[:-7]
-    if name.endswith(".nii"):
-        return name[:-4]
-    return os.path.splitext(name)[0]
+        name = name[:-7]
+    else:
+        name = Path(path).stem
 
-def build_facts(ct_path: str,
-                label_path: str,
-                min_calci_vox: int = 20):
-    ct_img = nib.load(ct_path)
-    spacing_xyz = ct_img.header.get_zooms()[:3]
+    name = name.replace("_predict", "")
+    name = name.replace("_pred", "")
+    name = name.replace("_gt", "")
 
-    lbl_img = nib.load(label_path)
-    lbl = lbl_img.get_fdata().astype(np.int16)
+    return name
 
-    # 基本一致性檢查（不阻擋流程，但會寫 qc flag）
-    qc_flags = []
-    if lbl.shape != ct_img.shape:
-        qc_flags.append("shape_mismatch_ct_label")
 
-    vvox = voxel_volume_mm3(spacing_xyz)
-    case_id = strip_nii_gz(os.path.basename(ct_path))
+def get_spacing_from_nifti(nifti_img):
+    """
+    Returns voxel spacing in mm.
+    For NIfTI, header.get_zooms() usually gives spacing for x, y, z.
+    """
+    spacing = nifti_img.header.get_zooms()[:3]
+    return [float(x) for x in spacing]
 
-    facts = {
-        "schema_version": "1.0",
-        "case_id": case_id,
-        "modality": "CT",
-        "image_path": ct_path.replace("\\", "/"),
-        "label_path": label_path.replace("\\", "/"),
-        "shape_dhw": to_dhw_shape(lbl.shape),
-        "spacing_mm": [float(spacing_xyz[0]), float(spacing_xyz[1]), float(spacing_xyz[2])],
-        "labels": {str(k): v for k, v in LABEL_MAP.items()},
-        "structures": {},
-        "derived": {},
-        "prompts": [],
-        "qc_flags": qc_flags
-    }
 
-    # structures
-    for lid, name in LABEL_MAP.items():
-        mask = (lbl == lid)
-        vox = int(mask.sum())
-        vol_mm3 = float(vox * vvox)
-        vol_ml = float(vol_mm3 / 1000.0)
+def safe_float(x):
+    if x is None:
+        return None
+    return float(np.round(x, 6))
 
-        st = {
-            "present": bool(vox > 0),
-            "voxel_count": vox,
-            "volume_mm3": vol_mm3,
-            "volume_ml": vol_ml
+
+def compute_structure_facts(mask: np.ndarray, label: int, spacing_mm):
+    binary = mask == label
+    voxel_count = int(binary.sum())
+
+    if voxel_count == 0:
+        return {
+            "label": label,
+            "present": False,
+            "voxel_count": 0,
+            "volume_mm3": 0.0,
+            "volume_ml": 0.0,
+            "bbox_voxel": None,
+            "slice_range_z": None,
+            "centroid_voxel": None,
         }
 
-        if vox > 0:
-            idx = np.where(mask)  # (x,y,z)
-            st["centroid_voxel"] = compute_centroid(idx)
-            st["bbox_voxel"] = compute_bbox(idx)
+    coords = np.argwhere(binary)
 
-        if name == "aortic_valve_calcification":
-            num_cc, largest_mm3 = connected_components_stats(mask, spacing_xyz)
-            st["num_connected_components"] = num_cc
-            st["largest_component_mm3"] = largest_mm3
+    min_xyz = coords.min(axis=0)
+    max_xyz = coords.max(axis=0)
+    size_xyz = max_xyz - min_xyz + 1
 
-        facts["structures"][name] = st
+    centroid = coords.mean(axis=0)
 
-    # 鈣化小物件門檻：小於 min_calci_vox 視為不存在
-    calci = facts["structures"]["aortic_valve_calcification"]
-    if 0 < calci["voxel_count"] < min_calci_vox:
-        facts["qc_flags"].append("calcification_below_threshold")
-        calci["present"] = False
-        calci["voxel_count"] = 0
-        calci["volume_mm3"] = 0.0
-        calci["volume_ml"] = 0.0
-        calci["num_connected_components"] = 0
-        calci["largest_component_mm3"] = 0.0
+    voxel_volume_mm3 = float(np.prod(spacing_mm))
+    volume_mm3 = voxel_count * voxel_volume_mm3
+    volume_ml = volume_mm3 / 1000.0
 
-    # 邏輯一致性 QC
-    if facts["structures"]["aortic_valve"]["voxel_count"] == 0:
-        facts["qc_flags"].append("empty_aortic_valve")
-        if calci["present"]:
-            facts["qc_flags"].append("inconsistent_calci_without_valve")
+    z_values = coords[:, 2]
+    slice_range_z = [int(z_values.min()), int(z_values.max())]
 
-    if len(facts["qc_flags"]) == 0:
-        facts["qc_flags"].append("ok")
-
-    # derived（給報告/QA 直接用）
-    valve = facts["structures"]["aortic_valve"]
-    facts["derived"] = {
-        "myocardium_volume_ml": float(facts["structures"]["myocardium"]["volume_ml"]),
-        "aortic_valve_volume_ml": float(valve["volume_ml"]),
-        "calcification_present": bool(calci["present"]),
-        "calcification_volume_mm3": float(calci["volume_mm3"]),
-        "calcification_volume_ml": float(calci["volume_ml"]),
-        "calcification_to_valve_ratio": float(calci["volume_mm3"] / max(valve["volume_mm3"], 1e-6))
+    return {
+        "label": label,
+        "present": True,
+        "voxel_count": voxel_count,
+        "volume_mm3": safe_float(volume_mm3),
+        "volume_ml": safe_float(volume_ml),
+        "bbox_voxel": {
+            "min": [int(x) for x in min_xyz],
+            "max": [int(x) for x in max_xyz],
+            "size": [int(x) for x in size_xyz],
+        },
+        "slice_range_z": slice_range_z,
+        "centroid_voxel": [safe_float(x) for x in centroid],
     }
 
-    # prompts（你後面要做 ROI prompt 時很方便）
-    # 這裡先放 bbox prompt（不用額外存檔），以 aortic_valve 為 ROI
-    if "bbox_voxel" in valve:
-        facts["prompts"].append({
-            "type": "bbox",
-            "target": "aortic_valve",
-            "prompt_bbox_voxel": valve["bbox_voxel"]
-        })
+
+def classify_calcification_severity(calc_volume_mm3, valve_volume_mm3):
+    """
+    Rule-based severity.
+    這裡的 threshold 先當作 heuristic。
+    之後如果有醫師標註或文獻標準，可以再調整。
+
+    建議論文寫法：
+    Since expert severity labels were not available, a rule-based severity
+    estimate was defined based on the calcification-to-aortic-valve volume ratio.
+    """
+
+    if calc_volume_mm3 <= 0:
+        return "none"
+
+    if valve_volume_mm3 <= 0:
+        return "unknown"
+
+    ratio = calc_volume_mm3 / valve_volume_mm3
+
+    if ratio < 0.05:
+        return "mild"
+    elif ratio < 0.20:
+        return "moderate"
+    else:
+        return "severe"
+
+
+def compute_slice_count(structure_fact):
+    if not structure_fact["present"] or structure_fact["slice_range_z"] is None:
+        return 0
+
+    z_min, z_max = structure_fact["slice_range_z"]
+    return int(z_max - z_min + 1)
+
+
+def build_facts(mask_path: str, image_path: str = None):
+    mask_nii = nib.load(mask_path)
+    mask = mask_nii.get_fdata().astype(np.int16)
+
+    spacing_mm = get_spacing_from_nifti(mask_nii)
+    patient_id = get_patient_id(mask_path)
+
+    facts = {
+        "patient_id": patient_id,
+        "mask_path": str(mask_path),
+        "image_path": str(image_path) if image_path else None,
+        "image_shape": [int(x) for x in mask.shape],
+        "spacing_mm": spacing_mm,
+        "structures": {},
+        "derived_metrics": {},
+        "answerable_findings": {},
+        "limitations": [],
+    }
+
+    for label, name in LABEL_MAP.items():
+        facts["structures"][name] = compute_structure_facts(
+            mask=mask,
+            label=label,
+            spacing_mm=spacing_mm,
+        )
+
+    myocardium = facts["structures"]["myocardium"]
+    valve = facts["structures"]["aortic_valve"]
+    calc = facts["structures"]["aortic_valve_calcification"]
+
+    calc_volume = calc["volume_mm3"]
+    valve_volume = valve["volume_mm3"]
+    myocardium_volume = myocardium["volume_mm3"]
+
+    if valve_volume > 0:
+        calc_to_valve_ratio = calc_volume / valve_volume
+    else:
+        calc_to_valve_ratio = None
+
+    if myocardium_volume > 0:
+        calc_to_myocardium_ratio = calc_volume / myocardium_volume
+    else:
+        calc_to_myocardium_ratio = None
+
+    severity = classify_calcification_severity(
+        calc_volume_mm3=calc_volume,
+        valve_volume_mm3=valve_volume,
+    )
+
+    facts["derived_metrics"] = {
+        "calcification_to_aortic_valve_volume_ratio": safe_float(calc_to_valve_ratio),
+        "calcification_to_myocardium_volume_ratio": safe_float(calc_to_myocardium_ratio),
+        "calcification_severity_rule_based": severity,
+        "calcification_slice_count": compute_slice_count(calc),
+    }
+
+    facts["answerable_findings"] = {
+        "has_myocardium_segmentation": myocardium["present"],
+        "has_aortic_valve_segmentation": valve["present"],
+        "has_aortic_valve_calcification": calc["present"],
+        "can_answer_calcification_volume": calc["present"],
+        "can_answer_calcification_severity": calc["present"] and valve["present"],
+        "can_answer_calcification_location": calc["present"],
+        "can_answer_structure_volume": True,
+        "can_answer_slice_range": True,
+
+        # 這些目前不應該讓 LLM 亂回答
+        "can_answer_cardiac_enlargement": False,
+        "can_answer_coronary_stenosis": False,
+        "can_answer_cardiac_function": False,
+        "can_answer_ejection_fraction": False,
+    }
+
+    facts["limitations"] = [
+        "Cardiac enlargement cannot be reliably determined without validated reference ranges, body-size normalization, or clinical diagnostic labels.",
+        "Coronary artery stenosis cannot be assessed from the current segmentation labels.",
+        "Functional cardiac information such as ejection fraction cannot be estimated from a single static CT segmentation.",
+        "The calcification severity is rule-based and should not be interpreted as a definitive clinical diagnosis.",
+    ]
 
     return facts
 
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ct_dir", required=True, help="放 CT: patient_0001.nii.gz 的資料夾")
-    ap.add_argument("--label_dir", required=True, help="放 label: patient_0001_gt.nii.gz 的資料夾")
-    ap.add_argument("--out_dir", required=True, help="輸出 facts.json 的資料夾")
-    ap.add_argument("--min_calci_vox", type=int, default=20, help="鈣化最小 voxel 門檻")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mask_path", required=True, help="Path to predicted segmentation mask .nii.gz")
+    parser.add_argument("--image_path", default=None, help="Optional original CT image path")
+    parser.add_argument("--out_path", required=True, help="Output facts.json path")
+    args = parser.parse_args()
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    facts = build_facts(
+        mask_path=args.mask_path,
+        image_path=args.image_path,
+    )
 
-    # 掃描 label_dir 找 *_gt.nii.gz / *_gt.nii
-    for fn in os.listdir(args.label_dir):
-        if not (fn.endswith(".nii.gz") or fn.endswith(".nii")):
-            continue
-        if "_gt" not in fn:
-            continue
+    os.makedirs(os.path.dirname(args.out_path), exist_ok=True)
 
-        label_path = os.path.join(args.label_dir, fn)
-        base = strip_nii_gz(fn).replace("_gt", "")  # patient_0001_gt -> patient_0001
-        ct_candidate_1 = os.path.join(args.ct_dir, base + ".nii.gz")
-        ct_candidate_2 = os.path.join(args.ct_dir, base + ".nii")
+    with open(args.out_path, "w", encoding="utf-8") as f:
+        json.dump(facts, f, ensure_ascii=False, indent=2)
 
-        if os.path.exists(ct_candidate_1):
-            ct_path = ct_candidate_1
-        elif os.path.exists(ct_candidate_2):
-            ct_path = ct_candidate_2
-        else:
-            print(f"[SKIP] 找不到對應CT：{base}.nii(.gz) for label {fn}")
-            continue
+    print(f"[OK] Saved facts to: {args.out_path}")
 
-        facts = build_facts(ct_path, label_path, min_calci_vox=args.min_calci_vox)
-        out_path = os.path.join(args.out_dir, f"{facts['case_id']}.json")
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(facts, f, ensure_ascii=False, indent=2)
-
-        print(f"[OK] {out_path}")
-
-    print("Done.")
 
 if __name__ == "__main__":
     main()

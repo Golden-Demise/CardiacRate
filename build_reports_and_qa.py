@@ -1,301 +1,493 @@
-import os
 import json
-import glob
 import argparse
+from pathlib import Path
 
 
-LABELS = {
+STRUCTURE_EN = {
     "myocardium": "myocardium",
     "aortic_valve": "aortic valve",
     "aortic_valve_calcification": "aortic valve calcification",
 }
 
 
-def compute_derived_if_missing(facts: dict) -> dict:
-    """Ensure facts['derived'] exists. Compute from facts['structures'] if missing."""
-    derived = facts.get("derived", {}) or {}
-    required = [
-        "myocardium_volume_ml",
-        "aortic_valve_volume_ml",
-        "calcification_present",
-        "calcification_volume_mm3",
-        "calcification_volume_ml",
-        "calcification_to_valve_ratio",
-    ]
-    if all(k in derived for k in required):
-        return derived
+SEVERITY_EN = {
+    "none": "none",
+    "mild": "mild",
+    "moderate": "moderate",
+    "severe": "severe",
+    "unknown": "unknown",
+}
 
-    structures = facts.get("structures", {}) or {}
-    myo = structures.get("myocardium", {}) or {}
-    valve = structures.get("aortic_valve", {}) or {}
-    calci = structures.get("aortic_valve_calcification", {}) or {}
 
-    myo_ml = float(myo.get("volume_ml", 0.0) or 0.0)
-    valve_ml = float(valve.get("volume_ml", 0.0) or 0.0)
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    calci_present = bool(calci.get("present", False))
-    calci_mm3 = float(calci.get("volume_mm3", 0.0) or 0.0)
-    calci_ml = float(calci.get("volume_ml", 0.0) or 0.0)
 
-    valve_mm3 = float(valve.get("volume_mm3", 0.0) or 0.0)
-    ratio = calci_mm3 / max(valve_mm3, 1e-6)
+def save_json(data, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    derived = {
-        "myocardium_volume_ml": myo_ml,
-        "aortic_valve_volume_ml": valve_ml,
-        "calcification_present": calci_present,
-        "calcification_volume_mm3": calci_mm3 if calci_present else 0.0,
-        "calcification_volume_ml": calci_ml if calci_present else 0.0,
-        "calcification_to_valve_ratio": ratio if calci_present else 0.0,
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    print(f"[OK] Saved QA dataset to: {path}")
+
+
+def fmt_number(x, digits=3):
+    if x is None:
+        return "unknown"
+    return f"{float(x):.{digits}f}"
+
+
+def get_structure(facts, name):
+    return facts.get("structures", {}).get(name, {})
+
+
+def get_present_structures(facts):
+    structures = facts.get("structures", {})
+    present_names = []
+
+    for key, value in structures.items():
+        if value.get("present", False):
+            present_names.append(STRUCTURE_EN.get(key, key))
+
+    return present_names
+
+
+def make_structure_presence_qa(facts):
+    patient_id = facts.get("patient_id", "unknown")
+    structures = facts.get("structures", {})
+
+    evidence_value = {
+        key: value.get("present", False)
+        for key, value in structures.items()
     }
-    facts["derived"] = derived
-    return derived
 
+    present_names = get_present_structures(facts)
 
-def format_report_en(facts: dict) -> str:
-    case_id = facts.get("case_id", "unknown_case")
-    qc_flags = facts.get("qc_flags", []) or []
-    d = compute_derived_if_missing(facts)
-
-    structures = facts.get("structures", {}) or {}
-    calci = structures.get("aortic_valve_calcification", {}) or {}
-    ncc = calci.get("num_connected_components", None)
-    largest = calci.get("largest_component_mm3", None)
-
-    lines = []
-    lines.append(f"Case: {case_id}")
-
-    spacing = facts.get("spacing_mm", None)
-    shape = facts.get("shape_dhw", None)
-    if spacing:
-        lines.append(f"Spacing (mm): {spacing}")
-    if shape:
-        lines.append(f"Shape (D,H,W): {shape}")
-
-    if qc_flags:
-        lines.append(f"QC flags: {', '.join(qc_flags)}")
-    lines.append("")
-
-    lines.append("Findings (Quantitative):")
-    lines.append(f"- Myocardium volume: {d['myocardium_volume_ml']:.3f} mL")
-    lines.append(f"- Aortic valve volume: {d['aortic_valve_volume_ml']:.3f} mL")
-
-    if d["calcification_present"]:
-        lines.append("- Aortic valve calcification: Present")
-        lines.append(f"  - Calcification volume: {d['calcification_volume_mm3']:.1f} mm³ ({d['calcification_volume_ml']:.3f} mL)")
-        lines.append(f"  - Calcification/valve ratio: {d['calcification_to_valve_ratio']*100:.2f}%")
-        if ncc is not None:
-            lines.append(f"  - Connected components (calcification): {int(ncc)}")
-        if largest is not None:
-            lines.append(f"  - Largest component volume: {float(largest):.1f} mm³")
+    if len(present_names) == 0:
+        answer = "No target anatomical structures were segmented in this CT case."
     else:
-        lines.append("- Aortic valve calcification: Absent")
+        answer = "The segmented structures include " + ", ".join(present_names) + "."
 
-    lines.append("")
-    lines.append("Impression:")
-    if qc_flags and qc_flags != ["ok"]:
-        lines.append("- Quantitative results are provided; please review QC flags for potential uncertainty.")
+    return {
+        "language": "en",
+        "patient_id": patient_id,
+        "category": "structure_presence",
+        "question": "Which anatomical structures were segmented in this CT case?",
+        "answer": answer,
+        "answerable": True,
+        "evidence": {
+            "source": "structures.*.present",
+            "value": evidence_value,
+        },
+    }
+
+
+def make_structure_volume_qa(facts, structure_key):
+    patient_id = facts.get("patient_id", "unknown")
+    structure = get_structure(facts, structure_key)
+    structure_name = STRUCTURE_EN.get(structure_key, structure_key)
+
+    present = structure.get("present", False)
+    volume_mm3 = structure.get("volume_mm3", None)
+    volume_ml = structure.get("volume_ml", None)
+
+    if present:
+        answer = (
+            f"The volume of the {structure_name} is approximately "
+            f"{fmt_number(volume_mm3)} mm³, equivalent to {fmt_number(volume_ml)} mL."
+        )
     else:
-        lines.append("- Quantitative summary as above.")
-    return "\n".join(lines)
+        answer = (
+            f"The {structure_name} was not segmented in this CT case; "
+            "therefore, its volume cannot be computed."
+        )
+
+    return {
+        "language": "en",
+        "patient_id": patient_id,
+        "category": "structure_volume",
+        "question": f"What is the volume of the {structure_name}?",
+        "answer": answer,
+        "answerable": True,
+        "evidence": {
+            "source": f"structures.{structure_key}.volume_mm3 / volume_ml",
+            "value": {
+                "present": present,
+                "volume_mm3": volume_mm3,
+                "volume_ml": volume_ml,
+            },
+        },
+    }
 
 
-def _yn(v: bool) -> str:
-    return "Yes" if v else "No"
+def make_structure_slice_range_qa(facts, structure_key):
+    patient_id = facts.get("patient_id", "unknown")
+    structure = get_structure(facts, structure_key)
+    structure_name = STRUCTURE_EN.get(structure_key, structure_key)
+
+    present = structure.get("present", False)
+    slice_range = structure.get("slice_range_z", None)
+
+    if present and slice_range is not None:
+        z_min, z_max = slice_range
+        slice_count = z_max - z_min + 1
+        answer = (
+            f"The {structure_name} appears approximately from z-slice {z_min} "
+            f"to z-slice {z_max}, covering about {slice_count} slices."
+        )
+    else:
+        answer = (
+            f"The {structure_name} was not segmented in this CT case; "
+            "therefore, no slice range is available."
+        )
+
+    return {
+        "language": "en",
+        "patient_id": patient_id,
+        "category": "slice_range",
+        "question": f"In which z-slices does the {structure_name} appear?",
+        "answer": answer,
+        "answerable": True,
+        "evidence": {
+            "source": f"structures.{structure_key}.slice_range_z",
+            "value": slice_range,
+        },
+    }
 
 
-def make_qa_pairs_en(facts: dict):
-    """
-    Return list of (question, answer, meta_dict) in English.
-    Expanded templates (18~30 per case).
-    """
-    d = compute_derived_if_missing(facts)
-    structures = facts.get("structures", {}) or {}
-    qc_flags = facts.get("qc_flags", []) or []
+def make_calcification_presence_qa(facts):
+    patient_id = facts.get("patient_id", "unknown")
+    calc = get_structure(facts, "aortic_valve_calcification")
 
-    myo_ml = float(d["myocardium_volume_ml"])
-    valve_ml = float(d["aortic_valve_volume_ml"])
-    calci_present = bool(d["calcification_present"])
-    calci_mm3 = float(d["calcification_volume_mm3"]) if calci_present else 0.0
-    calci_ml = float(d["calcification_volume_ml"]) if calci_present else 0.0
-    ratio_pct = float(d["calcification_to_valve_ratio"] * 100.0) if calci_present else 0.0
+    present = calc.get("present", False)
 
-    # Optional calcification morphology
-    calci_st = structures.get("aortic_valve_calcification", {}) or {}
-    ncc = calci_st.get("num_connected_components", None)
-    largest = calci_st.get("largest_component_mm3", None)
+    if present:
+        answer = "Aortic valve calcification was segmented in this CT case."
+    else:
+        answer = "No aortic valve calcification was segmented in this CT case."
 
-    qa = []
+    return {
+        "language": "en",
+        "patient_id": patient_id,
+        "category": "calcification_presence",
+        "question": "Is aortic valve calcification present in this case?",
+        "answer": answer,
+        "answerable": True,
+        "evidence": {
+            "source": "structures.aortic_valve_calcification.present",
+            "value": present,
+        },
+    }
 
-    # ---- Presence (multiple phrasings)
-    pres_qs = [
-        "Is aortic valve calcification present?",
-        "Is there any calcification in the aortic valve region?",
-        "Does this case show aortic valve calcification?",
-        "Is calcification detected at the aortic valve?",
-    ]
-    for q in pres_qs:
-        qa.append((q, _yn(calci_present), {"type": "presence", "target": "aortic_valve_calcification"}))
 
-    # ---- Volumes: myocardium (multiple phrasings)
-    myo_qs = [
-        "What is the myocardium volume (mL)?",
-        "Report the myocardium volume in milliliters.",
-        "Give the myocardium volume measured from segmentation (mL).",
-    ]
-    for q in myo_qs:
-        qa.append((q, f"{myo_ml:.3f} mL", {"type": "volume", "target": "myocardium", "unit": "mL", "value": myo_ml}))
+def make_calcification_volume_qa(facts):
+    patient_id = facts.get("patient_id", "unknown")
+    calc = get_structure(facts, "aortic_valve_calcification")
 
-    # ---- Volumes: aortic valve
-    valve_qs = [
-        "What is the aortic valve volume (mL)?",
-        "Report the aortic valve volume in milliliters.",
-        "Give the aortic valve volume measured from segmentation (mL).",
-    ]
-    for q in valve_qs:
-        qa.append((q, f"{valve_ml:.3f} mL", {"type": "volume", "target": "aortic_valve", "unit": "mL", "value": valve_ml}))
+    present = calc.get("present", False)
+    volume_mm3 = calc.get("volume_mm3", None)
+    volume_ml = calc.get("volume_ml", None)
 
-    # ---- Calcification volumes (always answer, absent -> 0)
-    calci_vol_qs_mm3 = [
-        "What is the aortic valve calcification volume (mm³)?",
-        "Report calcification volume in cubic millimeters (mm³).",
-        "How much aortic valve calcification is there in mm³?",
-    ]
-    for q in calci_vol_qs_mm3:
-        qa.append((q, f"{calci_mm3:.1f} mm³", {"type": "volume", "target": "aortic_valve_calcification", "unit": "mm3", "value": calci_mm3}))
+    if present:
+        answer = (
+            "The volume of the aortic valve calcification is approximately "
+            f"{fmt_number(volume_mm3)} mm³, equivalent to {fmt_number(volume_ml)} mL."
+        )
+    else:
+        answer = (
+            "No aortic valve calcification was segmented in this CT case; "
+            "therefore, the calcification volume is 0."
+        )
 
-    calci_vol_qs_ml = [
-        "What is the aortic valve calcification volume (mL)?",
-        "Report calcification volume in milliliters (mL).",
-        "How much aortic valve calcification is there in mL?",
-    ]
-    for q in calci_vol_qs_ml:
-        qa.append((q, f"{calci_ml:.3f} mL", {"type": "volume", "target": "aortic_valve_calcification", "unit": "mL", "value": calci_ml}))
+    return {
+        "language": "en",
+        "patient_id": patient_id,
+        "category": "calcification_volume",
+        "question": "What is the volume of the aortic valve calcification?",
+        "answer": answer,
+        "answerable": True,
+        "evidence": {
+            "source": "structures.aortic_valve_calcification.volume_mm3 / volume_ml",
+            "value": {
+                "present": present,
+                "volume_mm3": volume_mm3,
+                "volume_ml": volume_ml,
+            },
+        },
+    }
 
-    # ---- Ratio
-    ratio_qs = [
-        "What percentage of the aortic valve volume is calcified?",
-        "Report the calcification-to-valve volume ratio (%).",
-        "What is the calcification burden as a percentage of valve volume?",
-        "Provide calcification/valve volume ratio in percent.",
-    ]
-    for q in ratio_qs:
-        qa.append((q, f"{ratio_pct:.2f}%", {"type": "ratio", "target": "aortic_valve_calcification/aortic_valve", "unit": "%", "value": ratio_pct}))
 
-    # ---- Combined questions (more “agent-like”)
-    qa.append((
-        "Summarize aortic valve calcification status and volume.",
-        f"{'Calcification is present' if calci_present else 'Calcification is absent'}. "
-        f"Volume: {calci_mm3:.1f} mm³ ({calci_ml:.3f} mL).",
-        {"type": "summary", "target": "aortic_valve_calcification"}
-    ))
+def make_calcification_ratio_qa(facts):
+    patient_id = facts.get("patient_id", "unknown")
+    metrics = facts.get("derived_metrics", {})
 
-    qa.append((
-        "Provide myocardium volume and aortic valve volume (mL).",
-        f"Myocardium: {myo_ml:.3f} mL; Aortic valve: {valve_ml:.3f} mL.",
-        {"type": "pair_volume", "targets": ["myocardium", "aortic_valve"], "unit": "mL"}
-    ))
+    ratio = metrics.get("calcification_to_aortic_valve_volume_ratio", None)
 
-    qa.append((
-        "List the key quantitative measurements for this case.",
-        f"Myocardium volume: {myo_ml:.3f} mL; "
-        f"Aortic valve volume: {valve_ml:.3f} mL; "
-        f"Aortic valve calcification present: {_yn(calci_present)}; "
-        f"Calcification volume: {calci_mm3:.1f} mm³ ({calci_ml:.3f} mL); "
-        f"Calcification/valve ratio: {ratio_pct:.2f}%.",
-        {"type": "case_summary"}
-    ))
+    if ratio is None:
+        answer = (
+            "The calcification-to-aortic-valve volume ratio cannot be computed, "
+            "possibly because the aortic valve was not segmented."
+        )
+    else:
+        percentage = ratio * 100
+        answer = (
+            "The aortic valve calcification volume accounts for approximately "
+            f"{fmt_number(percentage)}% of the aortic valve volume."
+        )
 
-    # ---- QC question(s)
-    qa.append((
-        "Are there any QC warnings for this case?",
-        "No (ok)" if (qc_flags == ["ok"] or len(qc_flags) == 0) else "Yes: " + ", ".join(qc_flags),
-        {"type": "qc", "flags": qc_flags}
-    ))
+    return {
+        "language": "en",
+        "patient_id": patient_id,
+        "category": "calcification_ratio",
+        "question": "What is the calcification-to-aortic-valve volume ratio?",
+        "answer": answer,
+        "answerable": True,
+        "evidence": {
+            "source": "derived_metrics.calcification_to_aortic_valve_volume_ratio",
+            "value": ratio,
+        },
+    }
 
-    # ---- Calcification morphology if available
-    if ncc is not None:
-        qa.append((
-            "How many connected components are detected for aortic valve calcification?",
-            f"{int(ncc)}",
-            {"type": "morphology", "target": "aortic_valve_calcification", "field": "num_connected_components", "value": int(ncc)}
-        ))
-    if largest is not None:
-        qa.append((
-            "What is the volume of the largest calcification component (mm³)?",
-            f"{float(largest):.1f} mm³",
-            {"type": "morphology", "target": "aortic_valve_calcification", "field": "largest_component_mm3", "value": float(largest)}
-        ))
 
-    return qa
+def make_calcification_severity_qa(facts):
+    patient_id = facts.get("patient_id", "unknown")
+    metrics = facts.get("derived_metrics", {})
+
+    severity = metrics.get("calcification_severity_rule_based", "unknown")
+    severity_en = SEVERITY_EN.get(severity, severity)
+
+    if severity == "none":
+        answer = (
+            "Based on the current segmentation result, no aortic valve calcification "
+            "was identified in this case."
+        )
+    elif severity == "unknown":
+        answer = (
+            "The aortic valve calcification severity cannot be estimated, "
+            "possibly because the required aortic valve or calcification information is missing."
+        )
+    else:
+        answer = (
+            f"Based on the rule-based calculation, the aortic valve calcification "
+            f"severity is estimated as {severity_en}. "
+            "This estimate is derived from the calcification-to-aortic-valve volume ratio "
+            "and should not be interpreted as a definitive clinical diagnosis."
+        )
+
+    return {
+        "language": "en",
+        "patient_id": patient_id,
+        "category": "calcification_severity",
+        "question": "What is the estimated severity of aortic valve calcification in this case?",
+        "answer": answer,
+        "answerable": True,
+        "evidence": {
+            "source": "derived_metrics.calcification_severity_rule_based",
+            "value": severity,
+        },
+    }
+
+
+def make_unanswerable_qa(facts, question, target_key, reason):
+    patient_id = facts.get("patient_id", "unknown")
+    answerable_findings = facts.get("answerable_findings", {})
+    can_answer = answerable_findings.get(target_key, False)
+
+    if can_answer:
+        answer = (
+            "The current facts.json indicates that this question is answerable, "
+            "but no answer template has been defined for this question."
+        )
+        answerable = True
+    else:
+        answer = f"This question cannot be reliably answered from the current facts. {reason}"
+        answerable = False
+
+    return {
+        "language": "en",
+        "patient_id": patient_id,
+        "category": "unanswerable",
+        "question": question,
+        "answer": answer,
+        "answerable": answerable,
+        "evidence": {
+            "source": f"answerable_findings.{target_key}",
+            "value": can_answer,
+        },
+    }
+
+
+def make_summary_report_qa(facts):
+    patient_id = facts.get("patient_id", "unknown")
+
+    myocardium = get_structure(facts, "myocardium")
+    valve = get_structure(facts, "aortic_valve")
+    calc = get_structure(facts, "aortic_valve_calcification")
+    metrics = facts.get("derived_metrics", {})
+
+    parts = []
+
+    if myocardium.get("present", False):
+        parts.append(
+            f"the myocardium volume is approximately {fmt_number(myocardium.get('volume_ml'))} mL"
+        )
+    else:
+        parts.append("the myocardium was not segmented")
+
+    if valve.get("present", False):
+        parts.append(
+            f"the aortic valve volume is approximately {fmt_number(valve.get('volume_ml'))} mL"
+        )
+    else:
+        parts.append("the aortic valve was not segmented")
+
+    if calc.get("present", False):
+        severity = metrics.get("calcification_severity_rule_based", "unknown")
+        severity_en = SEVERITY_EN.get(severity, severity)
+        parts.append(
+            "aortic valve calcification is present, with a volume of approximately "
+            f"{fmt_number(calc.get('volume_mm3'))} mm³ and a rule-based severity of {severity_en}"
+        )
+    else:
+        parts.append("no aortic valve calcification was segmented")
+
+    answer = (
+        "Based on the segmentation-derived facts, "
+        + "; ".join(parts)
+        + ". These findings are derived from automatic segmentation and may be affected by segmentation errors."
+    )
+
+    return {
+        "language": "en",
+        "patient_id": patient_id,
+        "category": "summary_report",
+        "question": "Generate a structured summary based on the current facts.",
+        "answer": answer,
+        "answerable": True,
+        "evidence": {
+            "source": "structures + derived_metrics",
+            "value": {
+                "myocardium": myocardium,
+                "aortic_valve": valve,
+                "aortic_valve_calcification": calc,
+                "derived_metrics": metrics,
+            },
+        },
+    }
+
+
+def build_qa_for_one_facts(facts):
+    qa_list = []
+
+    qa_list.append(make_structure_presence_qa(facts))
+
+    qa_list.append(make_structure_volume_qa(facts, "myocardium"))
+    qa_list.append(make_structure_volume_qa(facts, "aortic_valve"))
+    qa_list.append(make_structure_volume_qa(facts, "aortic_valve_calcification"))
+
+    qa_list.append(make_structure_slice_range_qa(facts, "myocardium"))
+    qa_list.append(make_structure_slice_range_qa(facts, "aortic_valve"))
+    qa_list.append(make_structure_slice_range_qa(facts, "aortic_valve_calcification"))
+
+    qa_list.append(make_calcification_presence_qa(facts))
+    qa_list.append(make_calcification_volume_qa(facts))
+    qa_list.append(make_calcification_ratio_qa(facts))
+    qa_list.append(make_calcification_severity_qa(facts))
+
+    qa_list.append(
+        make_unanswerable_qa(
+            facts=facts,
+            question="Can this system determine coronary artery stenosis?",
+            target_key="can_answer_coronary_stenosis",
+            reason=(
+                "The current facts.json only contains segmentation-derived information "
+                "for the myocardium, aortic valve, and aortic valve calcification. "
+                "It does not include coronary artery lumen segmentation or stenosis annotations."
+            ),
+        )
+    )
+
+    qa_list.append(
+        make_unanswerable_qa(
+            facts=facts,
+            question="Can this system estimate the ejection fraction?",
+            target_key="can_answer_ejection_fraction",
+            reason=(
+                "The current facts are derived from a single static CT segmentation and do not include "
+                "cardiac-cycle or functional information required to estimate ejection fraction."
+            ),
+        )
+    )
+
+    qa_list.append(
+        make_unanswerable_qa(
+            facts=facts,
+            question="Can this system assess cardiac function?",
+            target_key="can_answer_cardiac_function",
+            reason=(
+                "The current facts do not include dynamic imaging, cardiac-cycle information, "
+                "or clinical functional labels."
+            ),
+        )
+    )
+
+    qa_list.append(make_summary_report_qa(facts))
+
+    return qa_list
+
+
+def build_qa_dataset(facts_dir):
+    facts_dir = Path(facts_dir)
+    facts_files = sorted(facts_dir.glob("*.json"))
+
+    if len(facts_files) == 0:
+        print(f"[WARN] No facts json files found in: {facts_dir}")
+        return []
+
+    dataset = []
+
+    for idx, facts_path in enumerate(facts_files, start=1):
+        try:
+            facts = load_json(facts_path)
+            qa_list = build_qa_for_one_facts(facts)
+            dataset.extend(qa_list)
+
+            print(f"[{idx}/{len(facts_files)}] [OK] {facts_path.name} -> {len(qa_list)} QA pairs")
+
+        except Exception as e:
+            print(f"[{idx}/{len(facts_files)}] [FAIL] {facts_path.name}")
+            print(f"    Error: {e}")
+
+    print()
+    print("========== QA dataset finished ==========")
+    print(f"Facts files: {len(facts_files)}")
+    print(f"QA pairs   : {len(dataset)}")
+
+    return dataset
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--facts_dir", required=True, help="Folder containing facts JSON files (*.json)")
-    ap.add_argument("--reports_dir", default="reports", help="Output folder for per-case reports")
-    ap.add_argument("--qa_out", default="qa_dataset.jsonl", help="Output QA jsonl file path")
-    ap.add_argument("--pos_oversample", type=int, default=1,
-                    help="Replicate calcification-related QA for positive cases (>=1). Example: 3 means 3x for positive cases.")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
 
-    os.makedirs(args.reports_dir, exist_ok=True)
+    parser.add_argument(
+        "--facts_dir",
+        required=True,
+        help="Directory containing facts json files.",
+    )
 
-    facts_paths = sorted(glob.glob(os.path.join(args.facts_dir, "*.json")))
-    if not facts_paths:
-        raise FileNotFoundError(f"No JSON files found in: {args.facts_dir}")
+    parser.add_argument(
+        "--out_path",
+        required=True,
+        help="Output QA dataset json path.",
+    )
 
-    total_cases = 0
-    total_qa = 0
-    calci_pos = 0
+    args = parser.parse_args()
 
-    with open(args.qa_out, "w", encoding="utf-8") as fqa:
-        for fp in facts_paths:
-            with open(fp, "r", encoding="utf-8") as ff:
-                facts = json.load(ff)
-
-            case_id = facts.get("case_id", os.path.splitext(os.path.basename(fp))[0])
-            total_cases += 1
-
-            # Write report
-            report_text = format_report_en(facts)
-            report_path = os.path.join(args.reports_dir, f"{case_id}.txt")
-            with open(report_path, "w", encoding="utf-8") as fr:
-                fr.write(report_text)
-
-            # Make QA
-            qa_pairs = make_qa_pairs_en(facts)
-
-            # Oversample calcification-related QA for positives (helps imbalance)
-            d = compute_derived_if_missing(facts)
-            is_pos = bool(d.get("calcification_present", False))
-            if is_pos:
-                calci_pos += 1
-
-            for (q, a, meta) in qa_pairs:
-                repeat = 1
-                if is_pos and args.pos_oversample > 1:
-                    # only oversample calcification-related questions
-                    if ("calcification" in q.lower()) or (meta.get("target", "") == "aortic_valve_calcification"):
-                        repeat = args.pos_oversample
-
-                for _ in range(repeat):
-                    obj = {
-                        "case_id": case_id,
-                        "question": q,
-                        "answer": a,
-                        "meta": meta,
-                        "facts_file": fp.replace("\\", "/")
-                    }
-                    fqa.write(json.dumps(obj, ensure_ascii=False) + "\n")
-                    total_qa += 1
-
-    print("Done.")
-    print(f"- cases: {total_cases}")
-    print(f"- calcification positive: {calci_pos} / {total_cases}")
-    print(f"- QA lines: {total_qa}")
-    print(f"- reports_dir: {args.reports_dir}")
-    print(f"- qa_out: {args.qa_out}")
+    dataset = build_qa_dataset(args.facts_dir)
+    save_json(dataset, args.out_path)
 
 
 if __name__ == "__main__":

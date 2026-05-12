@@ -1,79 +1,131 @@
-import os, json, argparse, random
+import json
+import random
+import argparse
+from pathlib import Path
 
-SYSTEM = (
-    "You are a cardiac assistant. Answer in English. "
-    "Use ONLY the provided FACTS. If the answer is not available in FACTS, "
-    "reply exactly: Not available in provided facts."
-)
+
+SYSTEM_PROMPT = """You are a cardiac CT assistant.
+You must answer only based on the provided structured facts.
+Do not invent unsupported medical findings.
+If the question cannot be answered from the facts, clearly state that it cannot be reliably answered.
+"""
+
 
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def build_facts_block(facts_obj, use_derived_only=True):
-    if use_derived_only and "derived" in facts_obj:
-        payload = {
-            "case_id": facts_obj.get("case_id", ""),
-            "qc_flags": facts_obj.get("qc_flags", []),
-            "derived": facts_obj.get("derived", {})
-        }
-    else:
-        payload = facts_obj
-    return json.dumps(payload, ensure_ascii=False, indent=2)
 
-def make_text(facts_block, question, answer):
-    return (
-        f"### SYSTEM\n{SYSTEM}\n\n"
-        f"### FACTS\n{facts_block}\n\n"
-        f"### QUESTION\n{question}\n\n"
-        f"### ANSWER\n{answer}\n"
-    )
+def save_jsonl(data, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "w", encoding="utf-8") as f:
+        for item in data:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    print(f"[OK] Saved {len(data)} samples to {path}")
+
+
+def format_evidence(evidence):
+    """
+    把 evidence 轉成文字，讓模型訓練時知道答案依據。
+    """
+    return json.dumps(evidence, ensure_ascii=False, indent=2)
+
+
+def qa_to_sft_text(item):
+    question = item.get("question", "")
+    answer = item.get("answer", "")
+    evidence = item.get("evidence", {})
+    answerable = item.get("answerable", True)
+    category = item.get("category", "unknown")
+
+    evidence_text = format_evidence(evidence)
+
+    user_prompt = f"""Question:
+{question}
+
+Evidence:
+{evidence_text}
+
+Answerable:
+{answerable}
+
+Category:
+{category}
+"""
+
+    text = f"""### System:
+{SYSTEM_PROMPT}
+
+### User:
+{user_prompt}
+
+### Assistant:
+{answer}
+"""
+
+    return {"text": text}
+
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--qa_jsonl", required=True)
-    ap.add_argument("--out_train", default="train.jsonl")
-    ap.add_argument("--out_val", default="val.jsonl")
-    ap.add_argument("--val_ratio", type=float, default=0.1)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--use_derived_only", action="store_true")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--qa_json",
+        required=True,
+        help="Path to qa_dataset_en.json",
+    )
+
+    parser.add_argument(
+        "--out_train",
+        default="train.jsonl",
+        help="Output train jsonl path",
+    )
+
+    parser.add_argument(
+        "--out_val",
+        default="val.jsonl",
+        help="Output validation jsonl path",
+    )
+
+    parser.add_argument(
+        "--val_ratio",
+        type=float,
+        default=0.1,
+        help="Validation ratio",
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+    )
+
+    args = parser.parse_args()
+
+    qa_data = load_json(args.qa_json)
+
+    sft_data = [qa_to_sft_text(item) for item in qa_data]
 
     random.seed(args.seed)
+    random.shuffle(sft_data)
 
-    rows = []
-    with open(args.qa_jsonl, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rows.append(json.loads(line))
+    val_size = max(1, int(len(sft_data) * args.val_ratio))
 
-    random.shuffle(rows)
-    n_val = max(1, int(len(rows) * args.val_ratio))
-    val_rows = rows[:n_val]
-    train_rows = rows[n_val:]
+    val_data = sft_data[:val_size]
+    train_data = sft_data[val_size:]
 
-    def write(rows, out_path):
-        with open(out_path, "w", encoding="utf-8") as out:
-            for r in rows:
-                facts_path = r.get("facts_file")
-                if not facts_path or not os.path.exists(facts_path):
-                    continue
-                facts_obj = load_json(facts_path)
-                facts_block = build_facts_block(facts_obj, use_derived_only=args.use_derived_only)
+    save_jsonl(train_data, args.out_train)
+    save_jsonl(val_data, args.out_val)
 
-                q = r["question"]
-                a = r["answer"]
-                text = make_text(facts_block, q, a)
+    print()
+    print("========== SFT data prepared ==========")
+    print(f"Total samples: {len(sft_data)}")
+    print(f"Train samples: {len(train_data)}")
+    print(f"Val samples  : {len(val_data)}")
 
-                out.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
-
-    write(train_rows, args.out_train)
-    write(val_rows, args.out_val)
-
-    print(f"Saved train: {args.out_train} ({len(train_rows)})")
-    print(f"Saved val:   {args.out_val} ({len(val_rows)})")
 
 if __name__ == "__main__":
     main()

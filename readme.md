@@ -1,10 +1,10 @@
 ```
 CardiacRate\Scripts\activate.bat
-python train_lora_sft.py --model_name Qwen/Qwen2.5-3B-Instruct --out_dir heart_lora
 ```
 
 ```
 python app_gradio.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\heart_lora --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
+python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_1 --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
 ```
 
 # Segmentation infer command for temp
@@ -49,4 +49,10 @@ Question：
 
 ```
 python train_lora_sft.py --model_name Qwen/Qwen2.5-3B-Instruct --train_jsonl D:\CardiacRate\dataset\sft_train.jsonl --val_jsonl D:\CardiacRate\dataset\sft_val.jsonl --out_dir D:\CardiacRate\heart_lora_2 --max_seq_len 1024 --batch_size 2 --grad_accum 8 --lr 2e-4 --epochs 3
+```
+
+# mistral
+
+```
+python train_lora_sft_mistral.py --model_name mistralai/Mistral-7B-Instruct-v0.3 --train_jsonl D:\CardiacRate\dataset\sft_train.jsonl --val_jsonl D:\CardiacRate\dataset\sft_val.jsonl --out_dir D:\heart_lora_mistral_1 --max_seq_len 2048 --batch_size 1 --grad_accum 8 --epochs 3
 ```

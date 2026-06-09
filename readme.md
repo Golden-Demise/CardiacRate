@@ -4,6 +4,7 @@ CardiacRate\Scripts\activate.bat
 
 ```
 python app_gradio.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\heart_lora --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
+
 python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_1 --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
 ```
 
@@ -14,6 +15,12 @@ Segmentation\infer.py
 
 python Segmentation\infer.py --model_name unetcnx_a1 --checkpoint D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model.pth --img_pth D:\CardiacRate\Segmentation\infer\ct\example.nii.gz --infer_dir D:\CardiacRate\Segmentation\infer\predict
 ```
+
+# make facts
+
+python make_facts.py --mask_path D:\CardiacRate\dataset\label\patient0001_gt.nii.gz --image_path D:\CardiacRate\dataset\ct\patient0001.nii.gz --out_path D:\CardiacRate\patient0001.json
+
+python batch_make_facts.py --image_dir D:\CardiacRate\dataset\ct --mask_dir D:\CardiacRate\dataset\label --out_dir D:\CardiacRate\dataset\facts3
 
 # create QA
 
@@ -43,9 +50,15 @@ Question：
 13. Can this system estimate the ejection fraction?
 14. Can this system assess cardiac function?
 15. Generate a structured summary based on the current facts.
+16. What is the Agatston-like score of the aortic valve calcification?
+17. Can you explain this CT result in simple terms?
+18. Is this result serious?
+19. What should I ask my doctor about this result?
 ```
 
 # train lora
+
+# Qwen
 
 ```
 python train_lora_sft.py --model_name Qwen/Qwen2.5-3B-Instruct --train_jsonl D:\CardiacRate\dataset\sft_train.jsonl --val_jsonl D:\CardiacRate\dataset\sft_val.jsonl --out_dir D:\CardiacRate\heart_lora_2 --max_seq_len 1024 --batch_size 2 --grad_accum 8 --lr 2e-4 --epochs 3
@@ -54,5 +67,13 @@ python train_lora_sft.py --model_name Qwen/Qwen2.5-3B-Instruct --train_jsonl D:\
 # mistral
 
 ```
-python train_lora_sft_mistral.py --model_name mistralai/Mistral-7B-Instruct-v0.3 --train_jsonl D:\CardiacRate\dataset\sft_train.jsonl --val_jsonl D:\CardiacRate\dataset\sft_val.jsonl --out_dir D:\heart_lora_mistral_1 --max_seq_len 2048 --batch_size 1 --grad_accum 8 --epochs 3
+python train_lora_sft_mistral.py --model_name mistralai/Mistral-7B-Instruct-v0.3 --train_jsonl D:\CardiacRate\dataset\sft_train.jsonl --val_jsonl D:\CardiacRate\dataset\sft_val.jsonl --out_dir D:\CardiacRate\heart_lora_mistral_1 --max_seq_len 2048 --batch_size 1 --grad_accum 8 --epochs 3
 ```
+
+# eval_qa.py
+
+python eval_qa.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\heart_lora_2 --facts_dir D:\CardiacRate\dataset\facts_test --qa_json D:\CardiacRate\dataset\qa_dataset_en.json --out_json D:\CardiacRate\dataset\eval_results.json --out_csv D:\CardiacRate\dataset\eval_results.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
+
+python eval_qa.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_4 --facts_dir D:\CardiacRate\dataset\facts3 --qa_json D:\CardiacRate\dataset\qa_dataset4_en.json --out_json D:\CardiacRate\dataset\eval_results_4.json --out_csv D:\CardiacRate\dataset\eval_results_4.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
+
+#

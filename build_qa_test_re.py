@@ -217,8 +217,8 @@ def generate_case_qa(model, facts, canonical_qa):
 
     payload = {
         "case_id": facts.get("patient_id", "unknown"),
-        "structured_facts": facts_for_prompt,
-        "canonical_qa": canonical_for_prompt,
+        "structured_facts": facts_for_prompt #,
+        # "canonical_qa": canonical_for_prompt,
     }
 
     messages = [
@@ -265,9 +265,9 @@ def generate_case_qa(model, facts, canonical_qa):
 
 def main():
     parser = argparse.ArgumentParser()
-    # parser.add_argument("--facts_path", required=True)
+    parser.add_argument("--facts_path", required=True)
     parser.add_argument("--canonical_qa_path", required=True)
-    # parser.add_argument("--out_path", required=True)
+    parser.add_argument("--out_path", required=True)
     parser.add_argument(
         "--model_id",
         default="mistralai/Mistral-7B-Instruct-v0.3",
@@ -306,11 +306,11 @@ def main():
     facts_for_prompt = compact_facts(facts)
     canonical_for_prompt = select_canonical_qa(canonical_qa, max_items=6)
 
-    payload = {
-        "case_id": facts.get("patient_id", "unknown"),
-        "structured_facts": facts_for_prompt,
-        "canonical_qa": canonical_for_prompt,
-    }
+    # payload = {
+    #     "case_id": facts.get("patient_id", "unknown"),
+    #     "structured_facts": facts_for_prompt,
+    #     "canonical_qa": canonical_for_prompt,
+    # }
 
     result = generate_case_qa(
         model=generator,

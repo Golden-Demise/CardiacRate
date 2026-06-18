@@ -12,6 +12,7 @@
 !requirements.txt
 !environment.yml
 !README.md
+!CodexContent.md
 !setup.py
 
 # 5. 重要：再次忽略不需要的系統資料夾

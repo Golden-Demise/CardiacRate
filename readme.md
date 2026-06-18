@@ -5,7 +5,7 @@ CardiacRate\Scripts\activate.bat
 ```
 python app_gradio.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\heart_lora --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
 
-python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_1 --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
+python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_5 --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
 ```
 
 # Segmentation infer command for temp
@@ -72,8 +72,8 @@ python train_lora_sft_mistral.py --model_name mistralai/Mistral-7B-Instruct-v0.3
 
 # eval_qa.py
 
-python eval_qa.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\heart_lora_2 --facts_dir D:\CardiacRate\dataset\facts_test --qa_json D:\CardiacRate\dataset\qa_dataset_en.json --out_json D:\CardiacRate\dataset\eval_results.json --out_csv D:\CardiacRate\dataset\eval_results.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
+python eval_qa.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\heart_lora_5 --facts_dir D:\CardiacRate\dataset\facts_test --qa_json D:\CardiacRate\dataset\qa_dataset4_en.json --out_json D:\CardiacRate\dataset\eval_results_5.json --out_csv D:\CardiacRate\dataset\eval_results_5.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
 
-python eval_qa.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_4 --facts_dir D:\CardiacRate\dataset\facts3 --qa_json D:\CardiacRate\dataset\qa_dataset4_en.json --out_json D:\CardiacRate\dataset\eval_results_4.json --out_csv D:\CardiacRate\dataset\eval_results_4.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
+python eval_qa.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_5 --facts_dir D:\CardiacRate\dataset\facts3 --qa_json D:\CardiacRate\dataset\qa_dataset4_en.json --out_json D:\CardiacRate\dataset\eval_results_4.json --out_csv D:\CardiacRate\dataset\eval_results_5.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
 
-#
+# rebuild qa with mistral

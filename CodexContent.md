@@ -1,4 +1,4 @@
-# CODEX_CONTEXT.md
+# CodexContent.md
 
 ## 專案名稱與定位
 
@@ -451,13 +451,13 @@ not_answerable
 
 範例：
 
-| 問題 | Answerability |
-|---|---|
-| 是否有主動脈瓣鈣化？ | fully_answerable |
-| 鈣化代表什麼？ | fully_answerable |
-| 這個結果嚴重嗎？ | partially_answerable |
+| 問題                 | Answerability                  |
+| -------------------- | ------------------------------ |
+| 是否有主動脈瓣鈣化？ | fully_answerable               |
+| 鈣化代表什麼？       | fully_answerable               |
+| 這個結果嚴重嗎？     | partially_answerable           |
 | 我有主動脈瓣狹窄嗎？ | requires_clinical_confirmation |
-| 我需要開刀嗎？ | not_answerable |
+| 我需要開刀嗎？       | not_answerable                 |
 
 ---
 

@@ -3,9 +3,9 @@ CardiacRate\Scripts\activate.bat
 ```
 
 ```
-python app_gradio.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\heart_lora --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
+python app_gradio.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\lora\heart_lora --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
 
-python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_5 --facts_dir D:\CardiacRate\dataset\facts3 --trust_remote_code
+python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\lora\heart_lora_mistral_5 --facts_dir D:\CardiacRate\dataset\facts3 --trust_remote_code
 ```
 
 # Segmentation infer command for temp

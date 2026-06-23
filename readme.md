@@ -75,17 +75,3 @@ python train_lora_sft_mistral.py --model_name mistralai/Mistral-7B-Instruct-v0.3
 python eval_qa.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\heart_lora_5 --facts_dir D:\CardiacRate\dataset\facts_test --qa_json D:\CardiacRate\dataset\qa_dataset4_en.json --out_json D:\CardiacRate\dataset\eval_results_5.json --out_csv D:\CardiacRate\dataset\eval_results_5.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
 
 python eval_qa.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_5 --facts_dir D:\CardiacRate\dataset\facts3 --qa_json D:\CardiacRate\dataset\qa_dataset4_en.json --out_json D:\CardiacRate\dataset\eval_results_4.json --out_csv D:\CardiacRate\dataset\eval_results_5.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
-
-# rebuild qa with mistral
-
-python build_qa_test_re.py
-|
-V
-merge_generated_qa.py
-
-python merge_generated_qa.py --qa_dir D:\CardiacRate\dataset\generated_qa\test3 --facts_dir D:\CardiacRate\dataset\facts3 --out_json D:\CardiacRate\dataset\qa_dataset_generated.json
-|
-V
-prepare_sft_dataset_by_patient.py
-
-python prepare_sft_dataset_by_patient.py --qa_json D:\CardiacRate\dataset\qa_dataset_generated.json --out_train D:\CardiacRate\dataset\sft_train6.jsonl --out_val D:\CardiacRate\dataset\sft_val6.jsonl --split_summary D:\CardiacRate\dataset\sft\split_summary.json --val_ratio 0.1 --seed 42

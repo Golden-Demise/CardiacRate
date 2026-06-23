@@ -13,6 +13,7 @@
 !environment.yml
 !README.md
 !CodexContent.md
+!abandon function readme.md
 !setup.py
 
 # 5. 重要：再次忽略不需要的系統資料夾

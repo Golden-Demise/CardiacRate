@@ -1136,9 +1136,6 @@ def build_qa_for_one_facts(facts):
     qa_list.append(make_aortic_stenosis_diagnosis_safety_qa(facts))
 
     # Patient-friendly QA
-    qa_list.append(make_patient_friendly_simple_explanation_qa(facts))
-    qa_list.append(make_patient_friendly_seriousness_qa(facts))
-    qa_list.append(make_patient_friendly_ask_doctor_qa(facts))
     qa_list.extend(make_patient_friendly_qa_list(facts))
 
     qa_list.append(

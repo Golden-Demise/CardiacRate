@@ -77,6 +77,37 @@ Required output:
 """.strip()
 
 
+SAFE_FALLBACKS: dict[tuple[str, str], list[str]] = {
+    (
+        "aortic_stenosis_diagnosis_safety",
+        "does this patient have aortic stenosis",
+    ): [
+        "Can the current CT information determine whether this patient has aortic stenosis?",
+        "Can aortic stenosis be diagnosed in this patient from the current CT information?",
+        "Is it possible to determine from the current CT information whether this patient has aortic stenosis?",
+    ],
+    (
+        "patient_friendly_aortic_stenosis_safety",
+        "do i have aortic stenosis",
+    ): [
+        "Can the current CT information determine whether I have aortic stenosis?",
+        "Can aortic stenosis be diagnosed from my current CT information?",
+        "Do the current CT findings provide enough information to determine whether I have aortic stenosis?",
+    ],
+}
+
+
+def get_safe_fallback_variants(
+    original_question: str,
+    category: str,
+) -> list[str]:
+    key = (
+        category,
+        normalize_text(original_question),
+    )
+    return SAFE_FALLBACKS.get(key, [])
+
+
 def load_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -519,12 +550,45 @@ def generate_variants_once(
     existing_variants: list[str],
     debug_path: str | Path,
 ) -> list[str]:
-    payload = {
-        "category": category,
-        "original_question": original_question,
-        "requested_count": requested_count,
-        "existing_variants_to_avoid": existing_variants,
-    }
+    category_instruction = ""
+
+    if category == "aortic_stenosis_diagnosis_safety":
+        category_instruction = (
+            "Preserve the diagnosis question. Ask whether the patient has "
+            "aortic stenosis or whether the current CT information can "
+            "determine or diagnose it. Do not change the question into only "
+            "asking whether the CT shows evidence or signs."
+        )
+    elif category == "patient_friendly_aortic_stenosis_safety":
+        category_instruction = (
+            "Preserve the first-person diagnosis question. Ask whether the "
+            "current CT information can determine whether I have aortic "
+            "stenosis. Do not ask only whether there are signs or evidence."
+        )
+
+    avoid_text = (
+        "\n".join(f"- {value}" for value in existing_variants)
+        if existing_variants
+        else "- None"
+    )
+
+    user_instruction = f"""Original question:
+{original_question}
+
+Category:
+{category}
+
+Generate exactly {requested_count} distinct natural-English paraphrase(s).
+
+Already accepted variants to avoid:
+{avoid_text}
+
+Additional category rule:
+{category_instruction or "Preserve the original intent exactly."}
+
+Return only:
+{{"question_variants": ["...", "..."]}}
+"""
 
     messages = [
         {
@@ -533,11 +597,7 @@ def generate_variants_once(
         },
         {
             "role": "user",
-            "content": json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2,
-            ),
+            "content": user_instruction,
         },
     ]
 
@@ -633,6 +693,12 @@ def generate_variants_until_complete(
             )
 
             if not valid:
+                print(
+                    f"[REJECT] template={template_number} | "
+                    f"round={round_number} | "
+                    f"reason={value_or_reason} | "
+                    f"candidate={candidate!r}"
+                )
                 continue
 
             accepted = value_or_reason
@@ -644,13 +710,43 @@ def generate_variants_until_complete(
             if len(collected) >= target_count:
                 break
 
-    if len(collected) != target_count:
-        raise RuntimeError(
-            f"Failed to generate {target_count} valid variants for: "
-            f"{original_question!r}. Generated {len(collected)}."
+    if len(collected) < target_count:
+        for fallback in get_safe_fallback_variants(
+            original_question=original_question,
+            category=category,
+        ):
+            valid, value_or_reason = validate_variant(
+                original_question=original_question,
+                variant=fallback,
+                existing_normalized=existing_normalized,
+                category=category,
+            )
+
+            if not valid:
+                continue
+
+            accepted = value_or_reason
+            collected.append(accepted)
+            existing_normalized.add(
+                normalize_text(accepted)
+            )
+
+            print(
+                f"[FALLBACK] template={template_number} | "
+                f"accepted={accepted!r}"
+            )
+
+            if len(collected) >= target_count:
+                break
+
+    if len(collected) < target_count:
+        print(
+            f"[WARN] Only {len(collected)}/{target_count} valid variants "
+            f"were produced for {original_question!r}. "
+            "The batch will continue with the valid variants."
         )
 
-    return collected
+    return collected[:target_count]
 
 
 def main() -> None:

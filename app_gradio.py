@@ -20,15 +20,63 @@ except Exception:
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
-LABEL_MAP = {
-    1: "myocardium",
-    2: "aortic_valve",
-    3: "aortic_valve_calcification",
+DATASET_CONFIGS = {
+    "Cardiac CT": {
+        "key": "ct",
+        "modality": "cardiac_ct",
+        "model_name": "unetcnx_a1",
+        "checkpoint": r"D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model.pth",
+        "infer_dir": r"D:\CardiacRate\dataset\predict",
+        "infer_py": os.path.join("Segmentation", "infer.py"),
+        "label_map": {
+            1: "myocardium",
+            2: "aortic_valve",
+            3: "aortic_valve_calcification",
+        },
+        "label_colors": {
+            1: [0, 255, 0],
+            2: [255, 255, 0],
+            3: [255, 0, 0],
+        },
+        "best_slice_labels": [2],
+    },
+    "ACDC cine-MRI": {
+        "key": "acdc",
+        "modality": "cine_mri",
+        "model_name": "unetcnx_a1",
+        "checkpoint": r"D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model_acdc.pth",
+        "infer_dir": r"D:\CardiacRate\dataset_acdc\predict",
+        "facts_out_dir": r"D:\CardiacRate\dataset_acdc\facts",
+        "infer_py": os.path.join("Segmentation", "infer_acdc.py"),
+        # Standard ACDC labels: 1=RV cavity, 2=myocardium, 3=LV cavity.
+        "label_map": {
+            1: "right_ventricle",
+            2: "myocardium",
+            3: "left_ventricle",
+        },
+        "label_colors": {
+            1: [0, 128, 255],
+            2: [0, 255, 0],
+            3: [255, 0, 0],
+        },
+        "best_slice_labels": [1, 2, 3],
+    },
 }
 
+DEFAULT_DATASET = "Cardiac CT"
+
+
+def get_dataset_config(dataset_name: str, ct_facts_dir: str = "") -> dict:
+    """Return one dataset configuration without mutating the global constant."""
+    name = dataset_name if dataset_name in DATASET_CONFIGS else DEFAULT_DATASET
+    cfg = dict(DATASET_CONFIGS[name])
+    if cfg["key"] == "ct":
+        cfg["facts_out_dir"] = ct_facts_dir
+    return cfg
+
 SYSTEM = (
-    "You are an evidence-grounded cardiac CT health consultation assistant."
-    "Your role is to help users understand cardiac CT analysis results in clear and natural language. You do not replace a physician and must not make unsupported diagnoses or treatment decisions."
+    "You are an evidence-grounded cardiac imaging health consultation assistant."
+    "Your role is to help users understand cardiac imaging analysis results in clear and natural language. You do not replace a physician and must not make unsupported diagnoses or treatment decisions."
     "Evidence rules:"
     "1. Use the provided case-specific structured facts as the only source for statements about this patient."
     "2. General medical education may be used only to explain medical terms or the usual meaning of a finding."
@@ -276,6 +324,66 @@ def make_facts_from_ct_and_label(
 
     return facts
 
+
+def make_facts_for_dataset(
+    dataset_name: str,
+    image_path: str,
+    label_path: str,
+    out_facts_path: str,
+    min_calci_vox: int = 20,
+):
+    """
+    Build dataset-specific facts.
+
+    Cardiac CT uses make_facts.py. ACDC uses make_facts_acdc.py when that
+    script exists beside app_gradio.py. This keeps ACDC segmentation usable
+    even before its facts generator is implemented.
+    """
+    cfg = get_dataset_config(dataset_name)
+    if cfg["key"] == "ct":
+        facts = make_facts_from_ct_and_label(
+            image_path,
+            label_path,
+            out_facts_path,
+            min_calci_vox=min_calci_vox,
+        )
+        return facts, ""
+
+    current_dir = Path(__file__).resolve().parent
+    make_facts_script = current_dir / "make_facts_acdc.py"
+    if not make_facts_script.exists():
+        return None, (
+            "ACDC segmentation completed, but make_facts_acdc.py was not found. "
+            "The prediction and overlay are available; facts-based QA is disabled for this case."
+        )
+
+    cmd = [
+        sys.executable,
+        str(make_facts_script),
+        "--mask_path", str(label_path),
+        "--image_path", str(image_path),
+        "--out_path", str(out_facts_path),
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "make_facts_acdc.py failed.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+    if not Path(out_facts_path).exists():
+        raise FileNotFoundError(
+            "make_facts_acdc.py finished, but the facts file was not created: "
+            f"{out_facts_path}"
+        )
+    return load_facts_file(out_facts_path), ""
+
 def run_segmentation_infer(
     infer_py: str,
     model_name: str,
@@ -291,8 +399,14 @@ def run_segmentation_infer(
 
     before = set(glob.glob(os.path.join(infer_dir, "*.nii*")))
 
+    infer_script = Path(infer_py)
+    if not infer_script.is_absolute():
+        infer_script = Path(__file__).resolve().parent / infer_script
+    if not infer_script.exists():
+        raise FileNotFoundError(f"Inference script not found: {infer_script}")
+
     cmd = [
-        sys.executable, infer_py,
+        sys.executable, str(infer_script),
         "--model_name", model_name,
         "--checkpoint", checkpoint,
         "--img_pth", ct_path,
@@ -300,7 +414,7 @@ def run_segmentation_infer(
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise RuntimeError(f"infer.py failed.\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+        raise RuntimeError(f"Inference failed.\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
 
     after = set(glob.glob(os.path.join(infer_dir, "*.nii*")))
     new_files = list(after - before)
@@ -313,7 +427,7 @@ def run_segmentation_infer(
         # fallback: pick newest overall
         all_files = list(after)
         if not all_files:
-            raise RuntimeError(f"infer.py finished but no nii/nii.gz found in {infer_dir}\nSTDOUT:\n{proc.stdout}")
+            raise RuntimeError(f"Inference finished but no nii/nii.gz was found in {infer_dir}\nSTDOUT:\n{proc.stdout}")
         pred = max(all_files, key=lambda p: os.path.getmtime(p))
         return pred, proc.stdout
 
@@ -381,8 +495,9 @@ def find_existing_pred(infer_dir: str, case_id: str):
         return None
     return max(cand, key=lambda p: os.path.getmtime(p))
 
-def pipeline_new_ct(
-    ct_upload,
+def pipeline_new_image(
+    dataset_name: str,
+    image_upload,
     model_name: str,
     checkpoint: str,
     infer_dir: str,
@@ -390,53 +505,49 @@ def pipeline_new_ct(
     min_calci_vox: int,
     progress=gr.Progress(track_tqdm=True)
 ):
-    """
-    1) copy uploaded CT to a stable D: working dir
-    2) run infer.py to get pred label
-    3) build facts.json
-    """
-    if ct_upload is None:
-        return "", "", "", "", "Please upload a CT (.nii/.nii.gz)."
- 
-    # Make sure paths exist
+    """Upload one cardiac image, run the selected segmentation, and build facts when supported."""
+    if image_upload is None:
+        return "", "", "", "", "", gr.update(interactive=False), None, "", None, "", -1, "Please upload a NIfTI image."
+
+    cfg = get_dataset_config(dataset_name, facts_out_dir)
     os.makedirs(infer_dir, exist_ok=True)
     os.makedirs(facts_out_dir, exist_ok=True)
 
-    # Copy CT to working dir to avoid Gradio temp path issues
-    progress(0.05, desc="Preparing CT file...")
-    src = ct_upload.name
-    dst_ct, case_id, invalidated = ensure_ct_in_store(src, infer_dir)
-    # expected facts path (fixed name)
-    facts_path = os.path.join(facts_out_dir, f"{case_id}.json")
+    progress(0.05, desc=f"Preparing {dataset_name} image...")
+    src = image_upload.name
+    dst_image, case_id, invalidated = ensure_ct_in_store(src, infer_dir)
+    expected_facts_path = os.path.join(facts_out_dir, f"{case_id}.json")
 
-    # if CT changed -> remove old pred/facts to avoid mismatch
     if invalidated:
         old_pred = find_existing_pred(infer_dir, case_id)
         if old_pred and os.path.exists(old_pred):
-            try: os.remove(old_pred)
-            except: pass
-        if os.path.exists(facts_path):
-            try: os.remove(facts_path)
-            except: pass
+            try:
+                os.remove(old_pred)
+            except OSError:
+                pass
+        if os.path.exists(expected_facts_path):
+            try:
+                os.remove(expected_facts_path)
+            except OSError:
+                pass
+
     pred_path = find_existing_pred(infer_dir, case_id)
     infer_log = ""
+    reused_prediction = bool(pred_path and os.path.exists(pred_path))
 
-    # Run segmentation
-    if pred_path and os.path.exists(pred_path):
+    if reused_prediction:
         infer_log = f"Reused existing prediction: {pred_path}"
     else:
-        progress(0.25, desc="Running segmentation inference...")
-        infer_py = os.path.join("Segmentation", "infer.py")
+        progress(0.25, desc=f"Running {dataset_name} segmentation...")
         pred_path, stdout = run_segmentation_infer(
-            infer_py=infer_py,
+            infer_py=cfg["infer_py"],
             model_name=model_name,
             checkpoint=checkpoint,
-            ct_path=dst_ct,
-            infer_dir=infer_dir
+            ct_path=dst_image,
+            infer_dir=infer_dir,
         )
         infer_log = stdout
 
-        # optional: rename to fixed <case>_predict.ext
         ext = ".nii.gz" if pred_path.lower().endswith(".nii.gz") else ".nii"
         fixed_pred = os.path.join(infer_dir, f"{case_id}_predict{ext}")
         if os.path.abspath(pred_path) != os.path.abspath(fixed_pred):
@@ -445,38 +556,77 @@ def pipeline_new_ct(
                     os.remove(fixed_pred)
                 os.replace(pred_path, fixed_pred)
                 pred_path = fixed_pred
-            except:
+            except OSError:
                 pass
 
-    # Build facts
-    progress(0.70, desc="Loading/Building facts.json...")
-    if not os.path.exists(facts_path):
-        make_facts_from_ct_and_label(dst_ct, pred_path, facts_path, min_calci_vox=min_calci_vox)
+    progress(0.70, desc="Loading or building facts.json...")
+    facts_note = ""
+    facts_obj = None
+    facts_path = expected_facts_path
+    if os.path.exists(facts_path):
+        facts_obj = load_facts_file(facts_path)
+    else:
+        facts_obj, facts_note = make_facts_for_dataset(
+            dataset_name,
+            dst_image,
+            pred_path,
+            facts_path,
+            min_calci_vox=min_calci_vox,
+        )
+        if facts_obj is None:
+            facts_path = ""
 
-    facts_obj = load_facts_file(facts_path)
-    facts_preview = json.dumps(
-        {"case_id": facts_obj.get("case_id"), "qc_flags": facts_obj.get("qc_flags"), "derived": facts_obj.get("derived")},
-        ensure_ascii=False, indent=2
+    if facts_obj is not None:
+        facts_preview = json.dumps(
+            {
+                "case_id": facts_obj.get("case_id"),
+                "modality": facts_obj.get("modality", cfg["modality"]),
+                "qc_flags": facts_obj.get("qc_flags"),
+                "derived": facts_obj.get("derived", facts_obj.get("derived_metrics")),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    else:
+        facts_preview = json.dumps(
+            {"case_id": case_id, "modality": cfg["modality"], "note": facts_note},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    best_z = pick_best_z_from_label(pred_path, dataset_name)
+    image_preview, image_info = render_ct_preview(dst_image, best_z)
+    overlay, overlay_info = render_seg_overlay(dst_image, pred_path, best_z, dataset_name)
+
+    image_vol = _get_cached("ct", dst_image)
+    z_count = image_vol.shape[-1]
+    slider_update = gr.update(
+        minimum=0,
+        maximum=z_count - 1,
+        value=best_z,
+        step=1,
+        interactive=True,
     )
-    # preview images: pick best slice based on valve
-    best_z = pick_best_z_from_valve(pred_path)
-    ct_img, ct_info = render_ct_preview(dst_ct, best_z)
-    overlay, ov_info = render_seg_overlay(dst_ct, pred_path, best_z)
-
-    # update slider range/value
-    ct_vol = _get_cached("ct", dst_ct)
-    Z = ct_vol.shape[-1]
-    slider_upd = gr.update(minimum=0, maximum=Z-1, value=best_z, step=1, interactive=True)
 
     progress(1.0, desc="Done.")
-    status = "OK (reused cache)" if ("Reused existing prediction" in infer_log) else "OK (new inference)"
+    cache_text = "reused cache" if reused_prediction else "new inference"
+    status = f"OK ({cache_text})"
+    if facts_note:
+        status += f" — {facts_note}"
 
-    # 你自己的 outputs 順序要對齊 UI，我提供一個常見順序：
     return (
-        dst_ct, pred_path, facts_path, facts_preview, infer_log,
-        slider_upd, ct_img, ct_info,
-        overlay, ov_info,
-        best_z, status
+        dst_image,
+        pred_path,
+        facts_path,
+        facts_preview,
+        infer_log,
+        slider_update,
+        image_preview,
+        image_info,
+        overlay,
+        overlay_info,
+        best_z,
+        status,
     )
 
 def _load_nii_full(path: str):
@@ -516,140 +666,216 @@ def render_ct_preview(ct_path: str, z: int = None):
     sl = np.rot90(sl, k=3)  # clockwise 90°
     return sl, f"CT shape={ct.shape}, z={z}/{Z-1}"
 
-def render_seg_overlay(ct_path: str, lbl_path: str, z: int):
-    ct = _get_cached("ct", ct_path)
+def render_seg_overlay(image_path: str, lbl_path: str, z: int, dataset_name: str = DEFAULT_DATASET):
+    image = _get_cached("ct", image_path)
     lbl = _get_cached("lbl", lbl_path)
 
-    Z = ct.shape[-1]
-    z = int(np.clip(z, 0, Z - 1))
-    if z is None:
-        # default: choose best valve slice
-        area = (lbl == 2).sum(axis=(0, 1))
-        z = int(area.argmax()) if area.max() > 0 else (Z // 2)
+    if image.shape != lbl.shape:
+        raise ValueError(
+            f"Image and prediction shapes do not match: image={image.shape}, prediction={lbl.shape}"
+        )
 
-    z = int(np.clip(z, 0, Z - 1))
+    z_count = image.shape[-1]
+    z = int(np.clip(z, 0, z_count - 1))
 
-    ct_u8 = _auto_window_to_uint8(ct[:, :, z])
-    rgb = np.stack([ct_u8, ct_u8, ct_u8], axis=-1).astype(np.float32)
+    image_u8 = _auto_window_to_uint8(image[:, :, z])
+    rgb = np.stack([image_u8, image_u8, image_u8], axis=-1).astype(np.float32)
 
-    m1 = (lbl[:, :, z] == 1)  # myocardium
-    m2 = (lbl[:, :, z] == 2)  # valve
-    m3 = (lbl[:, :, z] == 3)  # calcification
-
+    cfg = get_dataset_config(dataset_name)
     mask_rgb = np.zeros_like(rgb)
-    mask_rgb[m1] = [0, 255, 0]
-    mask_rgb[m2] = [255, 255, 0]
-    mask_rgb[m3] = [255, 0, 0]
+    any_mask = np.zeros(image_u8.shape, dtype=bool)
+    legend_items = []
+
+    for label_id, label_name in cfg["label_map"].items():
+        current_mask = lbl[:, :, z] == label_id
+        if current_mask.any():
+            mask_rgb[current_mask] = cfg["label_colors"][label_id]
+            any_mask |= current_mask
+        legend_items.append(f"{label_name}=label {label_id}")
 
     overlay = rgb.copy()
     alpha = 0.35
-    anym = m1 | m2 | m3
-    overlay[anym] = (1 - alpha) * rgb[anym] + alpha * mask_rgb[anym]
-
+    overlay[any_mask] = (1 - alpha) * rgb[any_mask] + alpha * mask_rgb[any_mask]
     overlay = overlay.clip(0, 255).astype(np.uint8)
-    overlay = np.rot90(overlay, k=3)  # clockwise 90°
-    info = f"Overlay z={z}/{Z-1} (myocardium=Green,aortic_valve=Yellow,aortic_valve_calcification=Red)"
+    overlay = np.rot90(overlay, k=3)
+
+    info = f"Overlay z={z}/{z_count - 1} ({', '.join(legend_items)})"
     return overlay, info
 
-def pick_best_z_from_valve(lbl_path: str):
+
+def pick_best_z_from_label(lbl_path: str, dataset_name: str = DEFAULT_DATASET):
     lbl = _get_cached("lbl", lbl_path)
-    # 找 valve(label==2) 面積最大的那層
-    area = (lbl == 2).sum(axis=(0, 1))
+    cfg = get_dataset_config(dataset_name)
+    labels = cfg.get("best_slice_labels") or list(cfg["label_map"].keys())
+    foreground = np.isin(lbl, labels)
+    area = foreground.sum(axis=(0, 1))
     return int(area.argmax()) if area.max() > 0 else (lbl.shape[-1] // 2)
 
-def on_ct_upload_init_cached(ct_upload, infer_dir, facts_out_dir, min_calci_vox):
-    def empty(status_msg="Please upload a CT."):
+def on_image_upload_init_cached(
+    dataset_name,
+    image_upload,
+    infer_dir,
+    facts_out_dir,
+    min_calci_vox,
+):
+    def empty(status_msg="Please upload a NIfTI image."):
         return (
-            gr.update(interactive=False),  # slider
-            None,                          # CT image
-            "",                            # CT info
-            None,                          # overlay image
-            "",                            # overlay info
-            "",                            # ct_path ✅
-            "",                            # pred path
-            "",                            # facts path
-            "",                            # facts preview
-            status_msg                     # status
+            gr.update(interactive=False),
+            None,
+            "",
+            None,
+            "",
+            "",
+            "",
+            "",
+            "",
+            status_msg,
         )
-    
-    if ct_upload is None:
-        return empty("Please upload a CT.")
 
-    src = ct_upload.name
-    if src is None:
-        return empty("Please upload a CT.")
+    if image_upload is None or image_upload.name is None:
+        return empty()
 
-    src_l = src.lower()
-    if not (src_l.endswith(".nii") or src_l.endswith(".nii.gz")):
-        return empty("Invalid file type. Please upload .nii/.nii.gz")
-    
+    src = image_upload.name
+    if not _is_nii(src):
+        return empty("Invalid file type. Please upload .nii or .nii.gz")
+
+    cfg = get_dataset_config(dataset_name, facts_out_dir)
     os.makedirs(infer_dir, exist_ok=True)
     os.makedirs(facts_out_dir, exist_ok=True)
 
-    dst_ct, case_id, invalidated = ensure_ct_in_store(src, infer_dir)
-    facts_path = os.path.join(facts_out_dir, f"{case_id}.json")
+    dst_image, case_id, _ = ensure_ct_in_store(src, infer_dir)
+    expected_facts_path = os.path.join(facts_out_dir, f"{case_id}.json")
     pred_path = find_existing_pred(infer_dir, case_id)
 
-    # slider init
-    ct = _get_cached("ct", dst_ct)
-    Z = ct.shape[-1]
-    z0 = Z // 2
-    slider_upd = gr.update(minimum=0, maximum=Z-1, value=z0, step=1, interactive=True)
+    image = _get_cached("ct", dst_image)
+    z_count = image.shape[-1]
+    z0 = z_count // 2
+    slider_update = gr.update(
+        minimum=0,
+        maximum=z_count - 1,
+        value=z0,
+        step=1,
+        interactive=True,
+    )
+    preview, preview_info = render_ct_preview(dst_image, z0)
 
-    # always show CT
-    ct_img, ct_info = render_ct_preview(dst_ct, z0)
-
-    # if pred exists -> show overlay (best_z) and maybe build facts if missing
     overlay = None
-    ov_info = "No prediction found yet."
+    overlay_info = "No prediction found yet."
     facts_preview = ""
-    status = ""
+    facts_path_output = expected_facts_path if os.path.exists(expected_facts_path) else ""
 
     if pred_path and os.path.exists(pred_path):
-        if not os.path.exists(facts_path):
-            make_facts_from_ct_and_label(dst_ct, pred_path, facts_path, min_calci_vox=min_calci_vox)
-
-        best_z = pick_best_z_from_valve(pred_path)
-        slider_upd = gr.update(minimum=0, maximum=Z-1, value=best_z, step=1, interactive=True)
-        ct_img, ct_info = render_ct_preview(dst_ct, best_z)
-        overlay, ov_info = render_seg_overlay(dst_ct, pred_path, best_z)
-
-        if os.path.exists(facts_path):
-            facts_obj = load_facts_file(facts_path)
-            facts_preview = json.dumps(
-                {"case_id": facts_obj.get("case_id"), "qc_flags": facts_obj.get("qc_flags"), "derived": facts_obj.get("derived")},
-                ensure_ascii=False, indent=2
+        facts_note = ""
+        facts_obj = None
+        if os.path.exists(expected_facts_path):
+            facts_obj = load_facts_file(expected_facts_path)
+        else:
+            facts_obj, facts_note = make_facts_for_dataset(
+                dataset_name,
+                dst_image,
+                pred_path,
+                expected_facts_path,
+                min_calci_vox=min_calci_vox,
             )
-        status = "Loaded cached prediction/facts."
+            if facts_obj is not None:
+                facts_path_output = expected_facts_path
+
+        best_z = pick_best_z_from_label(pred_path, dataset_name)
+        slider_update = gr.update(
+            minimum=0,
+            maximum=z_count - 1,
+            value=best_z,
+            step=1,
+            interactive=True,
+        )
+        preview, preview_info = render_ct_preview(dst_image, best_z)
+        overlay, overlay_info = render_seg_overlay(
+            dst_image,
+            pred_path,
+            best_z,
+            dataset_name,
+        )
+
+        if facts_obj is not None:
+            facts_preview = json.dumps(
+                {
+                    "case_id": facts_obj.get("case_id"),
+                    "modality": facts_obj.get("modality", cfg["modality"]),
+                    "qc_flags": facts_obj.get("qc_flags"),
+                    "derived": facts_obj.get("derived", facts_obj.get("derived_metrics")),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            status = "Loaded cached prediction and facts."
+        else:
+            facts_preview = json.dumps(
+                {"case_id": case_id, "modality": cfg["modality"], "note": facts_note},
+                ensure_ascii=False,
+                indent=2,
+            )
+            status = f"Loaded cached prediction. {facts_note}"
     else:
-        status = "No cached prediction. Click 'Run' to segment."
+        status = "No cached prediction. Click Run to segment."
 
     return (
-        slider_upd,
-        ct_img,
-        ct_info,
+        slider_update,
+        preview,
+        preview_info,
         overlay,
-        ov_info,
-        dst_ct,              # ✅這行新增：ct_path
+        overlay_info,
+        dst_image,
         pred_path or "",
-        facts_path,
+        facts_path_output,
         facts_preview,
-        status
+        status,
     )
 
-def on_z_change_update_overlay(z, ct_path, pred_path):
-    # 拖 slider 後：更新 CT +（如果已有 pred）更新 overlay
-    if not ct_path or not os.path.exists(ct_path):
-        return None, "", None, "No CT loaded.", -1
+
+def on_z_change_update_overlay(z, image_path, pred_path, dataset_name):
+    if not image_path or not os.path.exists(image_path):
+        return None, "", None, "No image loaded.", -1
 
     z = int(z)
-    ct_img, ct_info = render_ct_preview(ct_path, z)
+    preview, preview_info = render_ct_preview(image_path, z)
 
     if pred_path and os.path.exists(pred_path):
-        overlay, ov_info = render_seg_overlay(ct_path, pred_path, z)
-        return ct_img, ct_info, overlay, ov_info, z
-    else:
-        return ct_img, ct_info, None, "Run segmentation first to generate prediction.", -1
+        overlay, overlay_info = render_seg_overlay(
+            image_path,
+            pred_path,
+            z,
+            dataset_name,
+        )
+        return preview, preview_info, overlay, overlay_info, z
+
+    return preview, preview_info, None, "Run segmentation first to generate prediction.", -1
+
+
+def on_dataset_change(dataset_name, ct_facts_dir):
+    cfg = get_dataset_config(dataset_name, ct_facts_dir)
+    is_ct = cfg["key"] == "ct"
+    modality_name = "Cardiac CT" if is_ct else "ACDC cine-MRI"
+    return (
+        gr.update(value=cfg["model_name"]),
+        gr.update(value=cfg["checkpoint"]),
+        gr.update(value=cfg["infer_dir"]),
+        gr.update(value=cfg["facts_out_dir"]),
+        gr.update(value=cfg["infer_py"]),
+        gr.update(visible=is_ct, interactive=is_ct),
+        gr.update(value=None, label=f"Upload {modality_name} (.nii/.nii.gz)"),
+        gr.update(minimum=0, maximum=1, value=0, interactive=False),
+        None,
+        None,
+        "",
+        "",
+        f"Switched to {modality_name}. Upload an image to continue.",
+        "",
+        "",
+        "",
+        "",
+        "",
+        [],
+    )
 
 def messages_to_turns(history_messages):
     """Convert Gradio 'messages' history -> list[(user, assistant)] for prompt building."""
@@ -738,7 +964,7 @@ def chat_respond(user_msg, history, facts_path, max_new_tokens, temperature, top
     if (not facts_path) or (not os.path.exists(facts_path)):
         history = history + [
             {"role": "user", "content": user_msg},
-            {"role": "assistant", "content": "No facts loaded. Upload a CT and run segmentation (or load cached facts) first."}
+            {"role": "assistant", "content": "No facts loaded. Upload a cardiac image and run segmentation (or load cached facts) first."}
         ]
         return history, ""
 
@@ -761,7 +987,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base_model", required=True, help="HF model id, e.g. Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--lora_dir", required=True, help="Your LoRA output dir, e.g. D:\\heart_lora")
-    ap.add_argument("--facts_dir", required=True, help="Folder containing facts/*.json")
+    ap.add_argument("--facts_dir", required=True, help="Folder containing Cardiac CT facts/*.json")
     ap.add_argument("--cache_dir", default=r"D:\CardiacRate\hf_cache")
     ap.add_argument("--trust_remote_code", action="store_true", help="Enable for some models like Qwen if needed")
     ap.add_argument("--share", action="store_true", help="Create a public share link (optional)")
@@ -774,115 +1000,103 @@ def main():
 
     global FACTS_INDEX
     FACTS_INDEX = build_index(args.facts_dir)
-    case_ids = sorted(FACTS_INDEX.keys())
 
-    # infer variable
-    model_name = "unetcnx_a1"
-    checkpoint = r"D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model.pth"
-    infer_dir = r"D:\CardiacRate\dataset\predict"
-    facts_out_dir = args.facts_dir
+    ct_facts_dir_state_value = args.facts_dir
+    initial_cfg = get_dataset_config(DEFAULT_DATASET, ct_facts_dir_state_value)
 
     with gr.Blocks(title="Cardiac Agent (Seg + Facts + LLM)") as demo:
-        gr.Markdown("# Cardiac Agent (Segmentation + facts.json + LLM QA)\nAll answers are grounded on facts.json.")
+        gr.Markdown(
+            "# Cardiac Agent (Segmentation + facts.json + LLM QA)\n"
+            "Choose Cardiac CT or ACDC cine-MRI, then upload a NIfTI image."
+        )
 
-        # --- Existing tabs (you already have) can stay; here I just keep it minimal
+        ct_facts_dir_state = gr.State(ct_facts_dir_state_value)
+
         with gr.Tabs():
-            with gr.TabItem("New CT (Upload → Segment → facts → QA)"):
+            with gr.TabItem("New cardiac image (Upload → Segment → facts → QA)"):
                 with gr.Row():
-                    # LEFT: (1) Upload/Segment/Facts  — smaller
                     with gr.Column(scale=1, min_width=380):
-                        gr.Markdown("## 1) Upload CT → Segmentation → facts.json")
+                        gr.Markdown("## 1) Select dataset → Upload image → Segmentation")
 
-                        ct_upload = gr.File(
-                            label="Upload CT (.nii/.nii.gz)",
-                            file_types=[".nii", ".gz"]
+                        dataset_selector = gr.Dropdown(
+                            choices=list(DATASET_CONFIGS.keys()),
+                            value=DEFAULT_DATASET,
+                            label="Dataset / modality",
+                            interactive=True,
+                        )
+
+                        image_upload = gr.File(
+                            label="Upload Cardiac CT (.nii/.nii.gz)",
+                            file_types=[".nii", ".gz"],
                         )
                         overlay_z_state = gr.State(-1)
-                        
-                        z_slider = gr.Slider(0, 1, value=0, step=1, label="Z slice", interactive=False)
-                        ct_preview_img = gr.Image(label="CT preview", height=260)
-                        seg_overlay_img = gr.Image(label="Segmentation overlay", height=260)
-                        
-                        ct_preview_info = gr.Textbox(label="CT preview info", interactive=False)
-                        overlay_info = gr.Textbox(label="Overlay info", interactive=False)
 
+                        z_slider = gr.Slider(
+                            0,
+                            1,
+                            value=0,
+                            step=1,
+                            label="Z slice",
+                            interactive=False,
+                        )
+                        image_preview_img = gr.Image(label="Image preview", height=260)
+                        seg_overlay_img = gr.Image(label="Segmentation overlay", height=260)
+
+                        image_preview_info = gr.Textbox(label="Image preview info", interactive=False)
+                        overlay_info = gr.Textbox(label="Overlay info", interactive=False)
                         status_box = gr.Textbox(label="Status / Error", interactive=False)
 
-                        model_name = gr.Textbox(value="unetcnx_a1", label="Segmentation model_name")
-                        checkpoint = gr.Textbox(
-                            value=r"D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model.pth",
-                            label="Checkpoint path"
+                        model_name = gr.Textbox(
+                            value=initial_cfg["model_name"],
+                            label="Segmentation model_name",
                         )
-
+                        checkpoint = gr.Textbox(
+                            value=initial_cfg["checkpoint"],
+                            label="Checkpoint path",
+                        )
                         infer_dir = gr.Textbox(
-                            value=r"D:\CardiacRate\dataset\predict",
-                            label="infer_dir (pred output)"
+                            value=initial_cfg["infer_dir"],
+                            label="infer_dir (prediction output)",
                         )
                         facts_out_dir = gr.Textbox(
-                            value=facts_out_dir,
-                            label="facts_out_dir"
+                            value=initial_cfg["facts_out_dir"],
+                            label="facts_out_dir",
+                        )
+                        infer_script = gr.Textbox(
+                            value=initial_cfg["infer_py"],
+                            label="Inference script",
+                            interactive=False,
                         )
 
                         min_calci_vox = gr.Slider(
-                            0, 200, value=20, step=1,
-                            label="min_calci_vox"
+                            0,
+                            200,
+                            value=20,
+                            step=1,
+                            label="min_calci_vox (Cardiac CT only)",
                         )
 
-                        run_btn = gr.Button("Run Segmentation + Build facts.json", variant="primary")
+                        run_btn = gr.Button(
+                            "Run Segmentation + Build facts.json",
+                            variant="primary",
+                        )
 
-                        out_ct_path = gr.Textbox(label="Saved CT path", interactive=False)
-                        out_pred_path = gr.Textbox(label="Pred label path", interactive=False)
+                        out_image_path = gr.Textbox(label="Saved image path", interactive=False)
+                        out_pred_path = gr.Textbox(label="Prediction path", interactive=False)
                         out_facts_path = gr.Textbox(label="facts.json path", interactive=False)
 
-                        # 把 preview/log 放左邊會讓左邊變很長；如果你想更緊湊，可以先折疊：
                         with gr.Accordion("Debug / Preview", open=False):
-                            out_facts_preview = gr.Textbox(label="facts preview (derived)", lines=10)
-                            out_infer_log = gr.Textbox(label="infer.py STDOUT (debug)", lines=10)
-                        
-                        ct_upload.change(
-                            fn=on_ct_upload_init_cached,
-                            inputs=[ct_upload, infer_dir, facts_out_dir, min_calci_vox],
-                            outputs=[
-                                z_slider,
-                                ct_preview_img,
-                                ct_preview_info,
-                                seg_overlay_img,
-                                overlay_info,
-                                out_ct_path,        # ✅新增
-                                out_pred_path,
-                                out_facts_path,
-                                out_facts_preview,
-                                status_box
-                            ]
-                        )
+                            out_facts_preview = gr.Textbox(label="facts preview", lines=10)
+                            out_infer_log = gr.Textbox(label="Inference STDOUT", lines=10)
 
-                        z_slider.change(
-                            fn=on_z_change_update_overlay,
-                            inputs=[z_slider, out_ct_path, out_pred_path],
-                            outputs=[ct_preview_img, ct_preview_info, seg_overlay_img, overlay_info, overlay_z_state]
-                        )
-
-                        run_btn.click(
-                            fn=pipeline_new_ct,
-                            inputs=[ct_upload, model_name, checkpoint, infer_dir, facts_out_dir, min_calci_vox],
-                            outputs=[
-                                out_ct_path, out_pred_path, out_facts_path, out_facts_preview, out_infer_log,
-                                z_slider, ct_preview_img, ct_preview_info,
-                                seg_overlay_img, overlay_info,
-                                overlay_z_state, status_box
-                            ]
-                        )
-
-
-                    # RIGHT: (2) Ask questions — larger
                     with gr.Column(scale=2, min_width=520):
                         gr.Markdown("## 2) Chat (grounded on the generated facts.json)")
 
                         chatbot = gr.Chatbot(label="Chat", height=520)
                         user_msg = gr.Textbox(
-                            label="Message (English)",
-                            placeholder="Ask anything about this case (grounded on facts.json)...",
-                            lines=2
+                            label="Message",
+                            placeholder="Ask about this case using the generated facts...",
+                            lines=2,
                         )
 
                         with gr.Row():
@@ -894,23 +1108,109 @@ def main():
                             temp = gr.Slider(0.0, 1.0, value=0.0, step=0.05, label="temperature (0 = deterministic)")
                             top_p = gr.Slider(0.1, 1.0, value=1.0, step=0.05, label="top_p")
                         derived_only = gr.Checkbox(value=False, label="Use compact facts only")
-                        
-                        send_btn.click(
-                            fn=chat_respond,
-                            inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only],
-                            outputs=[chatbot, user_msg]
-                        )
 
-                        # Enter 送出
-                        user_msg.submit(
-                            fn=chat_respond,
-                            inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only],
-                            outputs=[chatbot, user_msg]
-                        )
+                dataset_selector.change(
+                    fn=on_dataset_change,
+                    inputs=[dataset_selector, ct_facts_dir_state],
+                    outputs=[
+                        model_name,
+                        checkpoint,
+                        infer_dir,
+                        facts_out_dir,
+                        infer_script,
+                        min_calci_vox,
+                        image_upload,
+                        z_slider,
+                        image_preview_img,
+                        seg_overlay_img,
+                        image_preview_info,
+                        overlay_info,
+                        status_box,
+                        out_image_path,
+                        out_pred_path,
+                        out_facts_path,
+                        out_facts_preview,
+                        out_infer_log,
+                        chatbot,
+                    ],
+                )
 
-                        clear_btn.click(lambda: [], outputs=[chatbot])
+                image_upload.change(
+                    fn=on_image_upload_init_cached,
+                    inputs=[
+                        dataset_selector,
+                        image_upload,
+                        infer_dir,
+                        facts_out_dir,
+                        min_calci_vox,
+                    ],
+                    outputs=[
+                        z_slider,
+                        image_preview_img,
+                        image_preview_info,
+                        seg_overlay_img,
+                        overlay_info,
+                        out_image_path,
+                        out_pred_path,
+                        out_facts_path,
+                        out_facts_preview,
+                        status_box,
+                    ],
+                )
+
+                z_slider.change(
+                    fn=on_z_change_update_overlay,
+                    inputs=[z_slider, out_image_path, out_pred_path, dataset_selector],
+                    outputs=[
+                        image_preview_img,
+                        image_preview_info,
+                        seg_overlay_img,
+                        overlay_info,
+                        overlay_z_state,
+                    ],
+                )
+
+                run_btn.click(
+                    fn=pipeline_new_image,
+                    inputs=[
+                        dataset_selector,
+                        image_upload,
+                        model_name,
+                        checkpoint,
+                        infer_dir,
+                        facts_out_dir,
+                        min_calci_vox,
+                    ],
+                    outputs=[
+                        out_image_path,
+                        out_pred_path,
+                        out_facts_path,
+                        out_facts_preview,
+                        out_infer_log,
+                        z_slider,
+                        image_preview_img,
+                        image_preview_info,
+                        seg_overlay_img,
+                        overlay_info,
+                        overlay_z_state,
+                        status_box,
+                    ],
+                )
+
+                send_btn.click(
+                    fn=chat_respond,
+                    inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only],
+                    outputs=[chatbot, user_msg],
+                )
+                user_msg.submit(
+                    fn=chat_respond,
+                    inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only],
+                    outputs=[chatbot, user_msg],
+                )
+                clear_btn.click(lambda: [], outputs=[chatbot])
 
         demo.launch(share=args.share)
+
 
 if __name__ == "__main__":
     main()

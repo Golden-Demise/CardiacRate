@@ -11,32 +11,30 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
 
-SYSTEM = (
-    "You are an evidence-grounded cardiac CT health consultation assistant."
-    "Your role is to help users understand cardiac CT analysis results in clear and natural language. You do not replace a physician and must not make unsupported diagnoses or treatment decisions."
-    "Evidence rules:"
-    "1. Use the provided case-specific structured facts as the only source for statements about this patient."
-    "2. General medical education may be used only to explain medical terms or the usual meaning of a finding."
-    "3. Do not invent findings, symptoms, medical history, diagnoses, test results, or treatment recommendations."
-    "4. Preserve numerical values and units exactly as provided in the facts."
-    "5. Do not expose raw JSON unless the user explicitly asks for it."
-    "Answering strategy:"
-    "1. Answer in the same language as the user's question."
-    "2. Adapt the explanation to the user's apparent level of medical knowledge."
-    "3. For a simple factual question, answer directly and briefly."
-    "4. For an explanatory or risk-related question, when appropriate:"
-    "* state what was found;"
-    "* explain what it means in plain language;"
-    "* state what cannot be concluded;"
-    "* mention what additional clinical information may be needed."
-    "5. If the question is only partially supported, answer the supported portion and clearly identify the missing information."
-    "6. If the question cannot be answered from the available evidence, explain why rather than giving only a generic refusal."
-    "7. When discussing aortic stenosis, distinguish a CT calcium-based risk estimate from a confirmed diagnosis. A confirmed assessment generally requires clinical evaluation and echocardiographic information such as blood-flow velocity, mean pressure gradient, and aortic valve area."
-    "8. Do not decide whether the user needs medication, surgery, or another treatment."
-    "9. Use calm, patient-friendly wording. Avoid unnecessary technical terminology, but include technical measurements when they are relevant to the question."
-    "10. Do not repeatedly add the same warning when a brief limitation statement is sufficient."
-    "The goal is to be accurate, helpful, understandable, and appropriately cautious while remaining grounded in the provided evidence."
-)
+SYSTEM = """You are an evidence-grounded cardiac CT health consultation assistant.
+    Your role is to help users understand cardiac CT analysis results in clear and natural language. You do not replace a physician and must not make unsupported diagnoses or treatment decisions.
+    Evidence rules:
+    1. Use the provided case-specific structured facts as the only source for statements about this patient.
+    2. General medical education may be used only to explain medical terms or the usual meaning of a finding.
+    3. Do not invent findings, symptoms, medical history, diagnoses, test results, or treatment recommendations.
+    4. Preserve numerical values and units exactly as provided in the facts.
+    5. Do not expose raw JSON unless the user explicitly asks for it.
+    Answering strategy:
+    1. Answer in the same language as the user's question.
+    2. Adapt the explanation to the user's apparent level of medical knowledge.
+    3. For a simple factual question, answer directly and briefly.
+    4. For an explanatory or risk-related question, when appropriate:
+    * state what was found;
+    * explain what it means in plain language;
+    * state what cannot be concluded;
+    * mention what additional clinical information may be needed.
+    5. If the question is only partially supported, answer the supported portion and clearly identify the missing information.
+    6. If the question cannot be answered from the available evidence, explain why rather than giving only a generic refusal.
+    7. When discussing aortic stenosis, distinguish a CT calcium-based risk estimate from a confirmed diagnosis. A confirmed assessment generally requires clinical evaluation and echocardiographic information such as blood-flow velocity, mean pressure gradient, and aortic valve area.
+    8. Do not decide whether the user needs medication, surgery, or another treatment.
+    9. Use calm, patient-friendly wording. Avoid unnecessary technical terminology, but include technical measurements when they are relevant to the question.
+    10. Do not repeatedly add the same warning when a brief limitation statement is sufficient.
+    The goal is to be accurate, helpful, understandable, and appropriately cautious while remaining grounded in the provided evidence.""".strip()
 
 
 def load_json(path):
@@ -100,6 +98,7 @@ def build_facts_block(facts_obj):
         "structures": facts_obj.get("structures", {}),
         "derived": facts_obj.get("derived", {}),
         "derived_metrics": facts_obj.get("derived_metrics", {}),
+        "diagnostic_findings": facts_obj.get("diagnostic_findings", {}),
         "answerable_findings": facts_obj.get("answerable_findings", {}),
         "limitations": facts_obj.get("limitations", []),
         "qc_flags": facts_obj.get("qc_flags", []),
@@ -107,21 +106,61 @@ def build_facts_block(facts_obj):
 
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
+CLINICAL_CONFIRMATION_CATEGORIES = {
+    "aortic_stenosis_diagnosis_safety",
+    "patient_friendly_diagnosis_safety",
+    "patient_friendly_aortic_stenosis_safety",
+    "patient_friendly_valve_blockage_safety",
+    "patient_friendly_symptom_safety",
+}
 
-def build_prompt(facts_block, question):
-    return (
-        f"### System:\n"
-        f"{SYSTEM}\n\n"
-        f"### User:\n"
-        f"Question:\n"
-        f"{question}\n\n"
-        f"FACTS:\n"
-        f"{facts_block}\n\n"
-        f"Instruction:\n"
-        f"Answer the question using only the FACTS. "
-        f"Write a natural-language answer. Do not output raw JSON or dictionaries.\n\n"
-        f"### Assistant:\n"
+def get_answerability(item):
+    answerability = item.get("answerability")
+
+    if answerability:
+        return answerability
+
+    answerable = item.get("answerable", True)
+    category = item.get("category", "")
+
+    if answerable:
+        return "fully_answerable"
+
+    if category in CLINICAL_CONFIRMATION_CATEGORIES:
+        return "requires_clinical_confirmation"
+
+    return "not_answerable"
+
+def build_prompt(item):
+    question = item.get("question", "")
+    evidence = item.get("evidence", {})
+    answerable = item.get("answerable", True)
+    category = item.get("category", "unknown")
+
+    evidence_text = json.dumps(
+        evidence,
+        ensure_ascii=False,
+        indent=2,
     )
+
+    return f"""### System:
+{SYSTEM}
+
+### User:
+Question:
+{question}
+
+Evidence:
+{evidence_text}
+
+Answerable:
+{answerable}
+
+Category:
+{category}
+
+### Assistant:
+"""
 
 
 def load_model(base_model, lora_dir, cache_dir=None, trust_remote_code=False):
@@ -207,7 +246,7 @@ def extract_numbers(text):
     return [float(x) for x in nums]
 
 
-def number_match_score(pred, gold, tolerance=1e-3):
+def number_match_score(pred, gold):
     """
     Simple numeric matching:
     Checks whether every number in gold appears approximately in pred.
@@ -217,17 +256,23 @@ def number_match_score(pred, gold, tolerance=1e-3):
 
     if len(gold_nums) == 0:
         return None
+    
+    def approximately_equal(a, b):
+        tolerance = max(0.01, abs(a) * 1e-4)
+        return abs(a - b) <= tolerance
 
     matched = 0
+    used_pred_indices = set()
 
     for g in gold_nums:
-        ok = False
-        for p in pred_nums:
-            if abs(g - p) <= tolerance:
-                ok = True
+        for index, p in enumerate(pred_nums):
+            if index in used_pred_indices:
+                continue
+
+            if approximately_equal(g, p):
+                matched += 1
+                used_pred_indices.add(index)
                 break
-        if ok:
-            matched += 1
 
     return matched / max(len(gold_nums), 1)
 
@@ -244,6 +289,7 @@ def reason_score(pred, answerable):
         "facts",
         "provided facts",
         "current facts",
+        "current ct facts",
         "dynamic imaging",
         "cardiac-cycle",
         "functional information",
@@ -254,6 +300,16 @@ def reason_score(pred, answerable):
         "does not include",
         "missing",
         "insufficient",
+        "echocardiography",
+        "peak velocity",
+        "mean pressure gradient",
+        "aortic valve area",
+        "clinical evaluation",
+        "medical history",
+        "cannot diagnose",
+        "cannot determine",
+        "cannot assess",
+        "cannot estimate",
     ]
 
     has_reason = any(marker in pred_l for marker in reason_markers)
@@ -270,10 +326,17 @@ def refusal_score(pred, answerable):
         "not available",
         "cannot be reliably answered",
         "cannot be answered",
+        "cannot definitively diagnose",
+        "cannot diagnose",
+        "cannot determine",
+        "cannot assess",
+        "cannot estimate",
         "not provided",
         "not included",
+        "does not include",
         "insufficient",
         "not enough information",
+        "requires echocardiography",
     ]
 
     has_refusal = any(m in pred_l for m in refusal_markers)
@@ -330,10 +393,10 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--base_model", required=True)
-    parser.add_argument("--lora_dir", required=True)
+    parser.add_argument("--lora_dir")
     parser.add_argument("--facts_dir", required=True)
     parser.add_argument("--qa_json", required=True)
-
+    parser.add_argument("--split_summary", default=None, help="Patient-level split summary JSON")
     parser.add_argument("--out_json", default="eval_results.json")
     parser.add_argument("--out_csv", default="eval_results.csv")
 
@@ -343,7 +406,7 @@ def main():
     parser.add_argument("--max_samples", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--max_new_tokens", type=int, default=128)
+    parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
 
@@ -363,11 +426,25 @@ def main():
     print("[INFO] Loading QA dataset...")
     qa_data = load_json(args.qa_json)
 
-    random.seed(args.seed)
-    random.shuffle(qa_data)
+    if args.split_summary:
+        split_info = load_json(args.split_summary)
 
-    if args.max_samples > 0:
-        qa_data = qa_data[:args.max_samples]
+        val_patient_ids = set(
+            split_info["val_patient_ids"]
+        )
+
+        qa_data = [
+            item
+            for item in qa_data
+            if item.get("patient_id") in val_patient_ids
+        ]
+
+        print(
+            f"[INFO] Validation patients: {len(val_patient_ids)}"
+        )
+        print(
+            f"[INFO] Validation QA samples: {len(qa_data)}"
+        )
 
     results = []
 
@@ -377,6 +454,7 @@ def main():
         gold_answer = item.get("answer", "")
         category = item.get("category", "")
         answerable = bool(item.get("answerable", True))
+        answerability = get_answerability(item)
 
         facts_path = facts_index.get(patient_id)
 
@@ -386,7 +464,8 @@ def main():
 
         facts_obj = load_json(facts_path)
         facts_block = build_facts_block(facts_obj)
-        prompt = build_prompt(facts_block, question)
+        # prompt = build_prompt(facts_block, question)
+        prompt = build_prompt(item)
 
         pred_answer = generate_answer(
             model=model,
@@ -409,6 +488,7 @@ def main():
             "patient_id": patient_id,
             "category": category,
             "answerable": answerable,
+            "answerability": answerability,
             "question": question,
             "gold_answer": gold_answer,
             "pred_answer": pred_answer,
@@ -449,6 +529,17 @@ def main():
 
         if raw_json:
             print(f"Raw JSON rate       : {sum(raw_json) / len(raw_json):.4f}")
+        reason = [
+            r["reason_score"]
+            for r in results
+            if r["reason_score"] is not None
+        ]
+
+        if reason:
+            print(
+                f"Reason accuracy   : "
+                f"{sum(reason) / len(reason):.4f}"
+            )
 
         print(f"Saved JSON: {args.out_json}")
         print(f"Saved CSV : {args.out_csv}")

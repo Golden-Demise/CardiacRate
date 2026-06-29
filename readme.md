@@ -4,8 +4,10 @@ CardiacRate\Scripts\activate.bat
 
 ```
 python app_gradio.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\lora\heart_lora --facts_dir D:\CardiacRate\dataset\facts --trust_remote_code
+```
 
-python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\lora\heart_lora_mistral_5 --facts_dir D:\CardiacRate\dataset\facts3 --trust_remote_code
+```
+python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\lora\heart_lora_mistral_8 --facts_dir D:\CardiacRate\infer\8 --trust_remote_code
 ```
 
 # Segmentation infer command for temp
@@ -18,9 +20,13 @@ python Segmentation\infer.py --model_name unetcnx_a1 --checkpoint D:\CardiacRate
 
 # make facts
 
+```
 python make_facts.py --mask_path D:\CardiacRate\dataset\label\patient0001_gt.nii.gz --image_path D:\CardiacRate\dataset\ct\patient0001.nii.gz --out_path D:\CardiacRate\patient0001.json
+```
 
+```
 python batch_make_facts.py --image_dir D:\CardiacRate\dataset\ct --mask_dir D:\CardiacRate\dataset\label --out_dir D:\CardiacRate\dataset\facts3
+```
 
 # create QA
 
@@ -32,27 +38,10 @@ python build_reports_and_qa.py --facts_dir D:\CardiacRate\dataset\facts3 --out_p
 python prepare_sft_dataset.py --qa_json D:\CardiacRate\dataset\qa_dataset_en.json --out_train D:\CardiacRate\dataset\sft_train\sft_train7.jsonl --out_val D:\CardiacRate\dataset\sft_val\sft_val7.jsonl --val_ratio 0.1
 ```
 
+以病人分割
+
 ```
-Question：
-1. Which anatomical structures were segmented in this CT case?
-2. What is the volume of the myocardium?
-3. What is the volume of the aortic valve?
-4. What is the volume of the aortic valve calcification?
-5. In which z-slices does the myocardium appear?
-6. In which z-slices does the aortic valve appear?
-7. In which z-slices does the aortic valve calcification appear?
-8. Is aortic valve calcification present in this case?
-9. What is the volume of the aortic valve calcification?
-10. What is the calcification-to-aortic-valve volume ratio?
-11. What is the estimated severity of aortic valve calcification in this case?
-12. Can this system determine coronary artery stenosis?
-13. Can this system estimate the ejection fraction?
-14. Can this system assess cardiac function?
-15. Generate a structured summary based on the current facts.
-16. What is the Agatston-like score of the aortic valve calcification?
-17. Can you explain this CT result in simple terms?
-18. Is this result serious?
-19. What should I ask my doctor about this result?
+python D:\CardiacRate\prepare_sft_dataset_by_patient.py --qa_json D:\CardiacRate\dataset\qa_dataset5_en_augmented_cleaned.json --out_train D:\CardiacRate\dataset\sft_train\sft_train8.jsonl --out_val D:\CardiacRate\dataset\sft_val\sft_val8.jsonl --split_summary D:\CardiacRate\dataset\sft_split\split_summary8.json --val_ratio 0.1 --seed 42
 ```
 
 # train lora
@@ -71,20 +60,40 @@ python train_lora_sft_mistral.py --model_name mistralai/Mistral-7B-Instruct-v0.3
 
 # eval_qa.py
 
+```
 python eval_qa.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\CardiacRate\heart_lora_5 --facts_dir D:\CardiacRate\dataset\facts_test --qa_json D:\CardiacRate\dataset\qa_dataset4_en.json --out_json D:\CardiacRate\dataset\eval_results_5.json --out_csv D:\CardiacRate\dataset\eval_results_5.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
+```
 
+```
 python eval_qa.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\heart_lora_mistral_5 --facts_dir D:\CardiacRate\dataset\facts3 --qa_json D:\CardiacRate\dataset\qa_dataset4_en.json --out_json D:\CardiacRate\dataset\eval_results_4.json --out_csv D:\CardiacRate\dataset\eval_results_5.csv --max_samples 30 --max_new_tokens 128 --temperature 0.0
+```
+
+```
+python eval_qa.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\lora\heart_lora_mistral_7_1 --facts_dir D:\CardiacRate\dataset\facts3 --qa_json D:\CardiacRate\dataset\qa_dataset5_en_augmented.json --out_json D:\CardiacRate\eval\mistral_7_1_results.json --out_csv D:\CardiacRate\eval\mistral_7_1_results.csv --max_samples 0 --max_new_tokens 256 --temperature 0
+```
+
+```
+python eval_qa.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\lora\heart_lora_mistral_7_2 --facts_dir D:\CardiacRate\dataset\facts_new --qa_json D:\CardiacRate\dataset\qa_dataset5_en_augmented_cleaned.json --split_summary D:\CardiacRate\dataset\sft_split\split_summary7_2.json --max_samples 0
+```
+
+python eval_qa.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\lora\heart_lora_mistral_8 --facts_dir D:\CardiacRate\dataset\facts3 --qa_json D:\CardiacRate\dataset\qa_dataset5_en_augmented_cleaned.json --split_summary D:\CardiacRate\dataset\sft_split\split_summary8.json --max_samples 0
 
 # rephrase the question with mistral
 
 # test
 
+```
 python augment_canonical_qa_with_mistral.py --qa_json D:\CardiacRate\dataset\qa_dataset5_en.json --out_json D:\CardiacRate\dataset\qa_dataset5_en_augmented_test_v3.json --variants_per_question 2 --max_templates 5 --max_rounds 8
+```
 
 # formal run
 
+```
 python D:\CardiacRate\augment_canonical_qa_with_mistral.py --qa_json D:\CardiacRate\dataset\qa_dataset5_en.json --out_json D:\CardiacRate\dataset\qa_dataset5_en_augmented.json --variants_per_question 5 --max_rounds 8
+```
 
 # out qa
 
+```
 python build_question_capability_catalog.py --input D:\CardiacRate\dataset\qa_dataset5_en_augmented_cleaned.json --output_json D:\CardiacRate\dataset\question_capability_catalog.json --output_md D:\CardiacRate\dataset\question_capability_catalog.md
+```

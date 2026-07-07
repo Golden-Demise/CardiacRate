@@ -100,8 +100,22 @@ Category:
 def split_by_patient(
     qa_data: list[dict[str, Any]],
     val_ratio: float,
+    test_ratio: float,
     seed: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[str],
+    list[str],
+    list[str],
+]:
+    """
+    Split samples by patient ID.
+
+    val_ratio and test_ratio are both calculated from the total number of
+    distinct patients. A patient can appear in only one split.
+    """
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for item in qa_data:
@@ -113,11 +127,12 @@ def split_by_patient(
         grouped[patient_id].append(item)
 
     patient_ids = sorted(grouped.keys())
+    patient_count = len(patient_ids)
 
-    if len(patient_ids) < 2:
+    if patient_count < 3:
         raise ValueError(
-            "At least two distinct patient IDs are required "
-            "for a train/validation split."
+            "At least three distinct patient IDs are required "
+            "for a train/validation/test split."
         )
 
     rng = random.Random(seed)
@@ -125,48 +140,94 @@ def split_by_patient(
 
     val_patient_count = max(
         1,
-        int(round(len(patient_ids) * val_ratio)),
+        int(round(patient_count * val_ratio)),
     )
-    val_patient_count = min(
-        val_patient_count,
-        len(patient_ids) - 1,
+    test_patient_count = max(
+        1,
+        int(round(patient_count * test_ratio)),
     )
 
-    val_patient_ids = set(patient_ids[:val_patient_count])
-    train_patient_ids = set(patient_ids[val_patient_count:])
+    # Rounding and the minimum-one rule must still leave at least one
+    # patient in the training set.
+    if val_patient_count + test_patient_count >= patient_count:
+        raise ValueError(
+            "The selected --val_ratio and --test_ratio leave no patients "
+            "for training. Reduce one or both ratios."
+        )
+
+    test_patient_ids = set(patient_ids[:test_patient_count])
+
+    val_start = test_patient_count
+    val_end = val_start + val_patient_count
+    val_patient_ids = set(patient_ids[val_start:val_end])
+
+    train_patient_ids = set(patient_ids[val_end:])
+
+    # Explicit leakage checks.
+    if train_patient_ids & val_patient_ids:
+        raise RuntimeError("Patient overlap detected between train and val.")
+    if train_patient_ids & test_patient_ids:
+        raise RuntimeError("Patient overlap detected between train and test.")
+    if val_patient_ids & test_patient_ids:
+        raise RuntimeError("Patient overlap detected between val and test.")
 
     train_items: list[dict[str, Any]] = []
     val_items: list[dict[str, Any]] = []
+    test_items: list[dict[str, Any]] = []
 
     for patient_id, items in grouped.items():
-        if patient_id in val_patient_ids:
+        if patient_id in test_patient_ids:
+            test_items.extend(items)
+        elif patient_id in val_patient_ids:
             val_items.extend(items)
-        else:
+        elif patient_id in train_patient_ids:
             train_items.extend(items)
+        else:
+            raise RuntimeError(
+                f"Patient {patient_id!r} was not assigned to any split."
+            )
 
     rng.shuffle(train_items)
     rng.shuffle(val_items)
+    rng.shuffle(test_items)
 
     return (
         train_items,
         val_items,
+        test_items,
         sorted(train_patient_ids),
         sorted(val_patient_ids),
+        sorted(test_patient_ids),
     )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Convert a merged QA JSON list into patient-level "
+            "train/validation/test SFT JSONL files."
+        )
+    )
     parser.add_argument("--qa_json", required=True)
     parser.add_argument("--out_train", default="train.jsonl")
     parser.add_argument("--out_val", default="val.jsonl")
+    parser.add_argument("--out_test", default="test.jsonl")
     parser.add_argument("--split_summary", default=None)
     parser.add_argument("--val_ratio", type=float, default=0.1)
+    parser.add_argument("--test_ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     if not 0.0 < args.val_ratio < 1.0:
         raise ValueError("--val_ratio must be between 0 and 1.")
+
+    if not 0.0 < args.test_ratio < 1.0:
+        raise ValueError("--test_ratio must be between 0 and 1.")
+
+    if args.val_ratio + args.test_ratio >= 1.0:
+        raise ValueError(
+            "--val_ratio + --test_ratio must be less than 1.0."
+        )
 
     qa_data = load_json(args.qa_json)
     if not isinstance(qa_data, list):
@@ -177,19 +238,24 @@ def main() -> None:
     (
         train_qa,
         val_qa,
+        test_qa,
         train_patient_ids,
         val_patient_ids,
+        test_patient_ids,
     ) = split_by_patient(
         qa_data=qa_data,
         val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
         seed=args.seed,
     )
 
     train_data = [qa_to_sft_text(item) for item in train_qa]
     val_data = [qa_to_sft_text(item) for item in val_qa]
+    test_data = [qa_to_sft_text(item) for item in test_qa]
 
     save_jsonl(train_data, args.out_train)
     save_jsonl(val_data, args.out_val)
+    save_jsonl(test_data, args.out_test)
 
     summary_path = (
         Path(args.split_summary)
@@ -201,24 +267,50 @@ def main() -> None:
     summary = {
         "seed": args.seed,
         "val_ratio": args.val_ratio,
+        "test_ratio": args.test_ratio,
+        "train_ratio": 1.0 - args.val_ratio - args.test_ratio,
+        "total_patient_count": (
+            len(train_patient_ids)
+            + len(val_patient_ids)
+            + len(test_patient_ids)
+        ),
+        "total_sample_count": len(qa_data),
         "train_patient_count": len(train_patient_ids),
         "val_patient_count": len(val_patient_ids),
+        "test_patient_count": len(test_patient_ids),
         "train_sample_count": len(train_data),
         "val_sample_count": len(val_data),
+        "test_sample_count": len(test_data),
         "train_patient_ids": train_patient_ids,
         "val_patient_ids": val_patient_ids,
+        "test_patient_ids": test_patient_ids,
+        "patient_overlap_check": {
+            "train_val_overlap": sorted(
+                set(train_patient_ids) & set(val_patient_ids)
+            ),
+            "train_test_overlap": sorted(
+                set(train_patient_ids) & set(test_patient_ids)
+            ),
+            "val_test_overlap": sorted(
+                set(val_patient_ids) & set(test_patient_ids)
+            ),
+        },
     }
 
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     print()
-    print("========== SFT data prepared ==========")
+    print("======= SFT train/val/test data prepared =======")
     print(f"Total samples : {len(qa_data)}")
     print(f"Train samples : {len(train_data)}")
     print(f"Val samples   : {len(val_data)}")
+    print(f"Test samples  : {len(test_data)}")
+    print(f"Total patients: {summary['total_patient_count']}")
     print(f"Train patients: {len(train_patient_ids)}")
     print(f"Val patients  : {len(val_patient_ids)}")
+    print(f"Test patients : {len(test_patient_ids)}")
+    print("Patient overlap: none")
     print(f"Split summary : {summary_path}")
 
 

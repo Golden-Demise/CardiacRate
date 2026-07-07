@@ -31,7 +31,7 @@ def get_infer_data(data_dict, args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model_name", required=True, help="Segmentation model id, e.g. unet3d")
+    ap.add_argument("--model_name", required=True, help="Segmentation model id, e.g. unetcnx")
     ap.add_argument("--device", default="cuda", type=str, help="c")
     ap.add_argument("--img_pth", required=True, default=None, help="target img for infer")
     ap.add_argument("--checkpoint", required=True, help="Segmentaion model pth put here")

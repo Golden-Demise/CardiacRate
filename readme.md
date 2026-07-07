@@ -18,6 +18,14 @@ Segmentation\infer.py
 python Segmentation\infer.py --model_name unetcnx_a1 --checkpoint D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model.pth --img_pth D:\CardiacRate\Segmentation\infer\ct\example.nii.gz --infer_dir D:\CardiacRate\Segmentation\infer\predict
 ```
 
+```
+python Segmentation\batch_infer.py --infer_script D:\CardiacRate\Segmentation\infer.py --input_dir D:\CardiacRate\dataset\ct --infer_dir D:\CardiacRate\dataset\predict --model_name unetcnx_a1 --checkpoint D:\CardiacRate\Segmentation\model\unetcnx_a1\best_model.pth
+```
+
+```
+python Segmentation\eval_seg_metrics.py --pred_dir D:\CardiacRate\dataset\predict --gt_dir D:\CardiacRate\dataset\label --out_csv D:\CardiacRate\dataset\eval_seg_metrics.csv --summary_csv D:\CardiacRate\dataset\eval_seg_summary.csv --calci_min_vox 20
+```
+
 # make facts
 
 ```
@@ -41,7 +49,7 @@ python prepare_sft_dataset.py --qa_json D:\CardiacRate\dataset\qa_dataset_en.jso
 以病人分割
 
 ```
-python D:\CardiacRate\prepare_sft_dataset_by_patient.py --qa_json D:\CardiacRate\dataset\qa_dataset5_en_augmented_cleaned.json --out_train D:\CardiacRate\dataset\sft_train\sft_train8.jsonl --out_val D:\CardiacRate\dataset\sft_val\sft_val8.jsonl --split_summary D:\CardiacRate\dataset\sft_split\split_summary8.json --val_ratio 0.1 --seed 42
+python D:\CardiacRate\prepare_sft_dataset_by_patient.py --qa_json D:\CardiacRate\dataset\qa_dataset5_en_augmented_cleaned.json --out_train D:\CardiacRate\dataset\sft_train\sft_train9.jsonl --out_val D:\CardiacRate\dataset\sft_val\sft_val9.jsonl --out_test D:\CardiacRate\dataset\sft_test9.jsonl --split_summary D:\CardiacRate\dataset\sft_split\split_summary9.json --val_ratio 0.1 --test_ratio 0.1 --seed 42
 ```
 
 # train lora

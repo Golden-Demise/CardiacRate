@@ -27,9 +27,37 @@ def save_img(img, img_meta_dict, pth):
 
 def infer(model, data, model_inferer, device):
     model.eval()
+
+    image = data["image"]
+
+    print("Before inference shape:", tuple(image.shape))
+
+    # 3D CT 未包含 batch 與 channel：
+    # [D, H, W] -> [1, 1, D, H, W]
+    if image.ndim == 3:
+        image = image.unsqueeze(0).unsqueeze(0)
+
+    # 通常是 DataLoader 已增加 batch，但缺少 channel：
+    # [B, D, H, W] -> [B, 1, D, H, W]
+    elif image.ndim == 4:
+        image = image.unsqueeze(1)
+
+    elif image.ndim != 5:
+        raise ValueError(
+            "UNETCNX_A1 expects image shape [B, C, D, H, W], "
+            f"but received {tuple(image.shape)}"
+        )
+
+    print("Model input shape:", tuple(image.shape))
+
+    image = image.to(device)
+
     with torch.no_grad():
-        output = model_inferer(data['image'].to(device))
+        output = model_inferer(image)
         output = torch.argmax(output, dim=1)
+
+    print("Prediction shape:", tuple(output.shape))
+
     return output
 
 

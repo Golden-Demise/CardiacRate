@@ -1,0 +1,33 @@
+# 由程式碼 import 反推整理(專案內從未提交過 requirements.txt / environment.yml,
+# git 歷史中查無版本鎖定紀錄,故版本號為建議值,非原始鎖定版本)
+# Python 版本: 3.10.7
+
+# --- 深度學習核心 ---
+# torch 請勿直接用這行安裝,改用下方「CUDA 對應安裝指令」一節,
+# 否則 pip 會裝到 CPU-only 版本
+# torch
+
+transformers>=4.40,<5
+peft>=0.10
+trl>=0.8
+datasets>=2.18
+accelerate>=0.28
+
+# --- 醫學影像 / 分割 ---
+monai>=1.3
+monailabel
+nibabel>=5.2
+
+# --- 傳統 ML / 資料處理 ---
+scikit-learn>=1.4
+scipy>=1.12
+numpy>=1.26
+pandas>=2.2
+joblib>=1.3
+
+# --- 視覺化 / 介面 ---
+matplotlib>=3.8
+gradio>=4.20
+
+# --- 其他工具 ---
+json-repair>=0.25

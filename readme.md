@@ -7,8 +7,11 @@ python app_gradio.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\Cardiac
 ```
 
 ```
-python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\lora\heart_lora_mistral_8 --facts_dir D:\CardiacRate\infer\8 --trust_remote_code
+python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\lora\heart_lora_mistral_9 --facts_dir D:\CardiacRate\infer\9 --trust_remote_code
+
+python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir D:\CardiacRate\lora\heart_lora_mistral_9 --facts_dir D:\CardiacRate\infer\9 --trust_remote_code --load_in_4bit
 ```
+
 
 # Segmentation infer command for temp
 

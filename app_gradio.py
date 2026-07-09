@@ -18,6 +18,10 @@ except Exception:
     cc_label = None
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
+try:
+    from transformers import BitsAndBytesConfig
+except Exception:
+    BitsAndBytesConfig = None
 from peft import PeftModel
 
 DATASET_CONFIGS = {
@@ -198,7 +202,7 @@ def build_index(facts_dir: str):
             pass
     return idx
 
-def load_model(base_model: str, lora_dir: str, cache_dir: str, trust_remote_code: bool):
+def load_model(base_model: str, lora_dir: str, cache_dir: str, trust_remote_code: bool, load_in_4bit: bool = False):
     global MODEL, TOKENIZER, DEVICE
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -213,14 +217,31 @@ def load_model(base_model: str, lora_dir: str, cache_dir: str, trust_remote_code
 
     dtype = torch.float16 if DEVICE == "cuda" else torch.float32
 
+    offload_dir = os.path.join(cache_dir, "offload")
+    os.makedirs(offload_dir, exist_ok=True)
+
+    quant_config = None
+    if load_in_4bit and DEVICE == "cuda":
+        if BitsAndBytesConfig is None:
+            raise RuntimeError("--load_in_4bit requires bitsandbytes to be installed.")
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+
     base = AutoModelForCausalLM.from_pretrained(
         base_model,
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map="auto" if DEVICE == "cuda" else None,
+        offload_folder=offload_dir if DEVICE == "cuda" else None,
+        quantization_config=quant_config,
+        low_cpu_mem_usage=True,
         cache_dir=cache_dir,
         trust_remote_code=trust_remote_code
     )
-    MODEL = PeftModel.from_pretrained(base, lora_dir)
+    MODEL = PeftModel.from_pretrained(base, lora_dir, offload_folder=offload_dir if DEVICE == "cuda" else None)
     MODEL.eval()
     if DEVICE == "cpu":
         MODEL.to("cpu")
@@ -1295,11 +1316,11 @@ def build_chat_prompt(facts_block: str, history_messages, user_msg: str, keep_la
     )
 
 @torch.no_grad()
-def generate_chat(prompt: str, max_new_tokens: int = 128, temperature: float = 0.0, top_p: float = 1.0) -> str:
+def generate_chat(prompt: str, max_new_tokens: int = 128, temperature: float = 0.0, top_p: float = 1.0, use_lora: bool = True) -> str:
     inputs = TOKENIZER(prompt, return_tensors="pt").to(DEVICE)
     input_len = inputs["input_ids"].shape[-1]
 
-    out = MODEL.generate(
+    gen_kwargs = dict(
         **inputs,
         max_new_tokens=max_new_tokens,
         do_sample=(temperature > 0.0),
@@ -1309,6 +1330,13 @@ def generate_chat(prompt: str, max_new_tokens: int = 128, temperature: float = 0
         eos_token_id=TOKENIZER.eos_token_id,
         repetition_penalty=1.05,
     )
+
+    if use_lora:
+        out = MODEL.generate(**gen_kwargs)
+    else:
+        # Temporarily disable the LoRA adapter so generation runs on the base model only.
+        with MODEL.disable_adapter():
+            out = MODEL.generate(**gen_kwargs)
 
     gen_ids = out[0][input_len:]
     ans = TOKENIZER.decode(gen_ids, skip_special_tokens=True).strip()
@@ -1332,9 +1360,10 @@ def generate_chat(prompt: str, max_new_tokens: int = 128, temperature: float = 0
 
     return ans
 
-def chat_respond(user_msg, history, facts_path, max_new_tokens, temperature, top_p, derived_only):
+def chat_respond(user_msg, history, facts_path, max_new_tokens, temperature, top_p, derived_only, model_variant="With LoRA (fine-tuned)"):
     history = history or []
     user_msg = (user_msg or "").strip()
+    use_lora = (model_variant != "Base model only")
     if not user_msg:
         return history, ""
 
@@ -1350,7 +1379,7 @@ def chat_respond(user_msg, history, facts_path, max_new_tokens, temperature, top
 
     prompt = build_chat_prompt(facts_block, history, user_msg, keep_last_k=4)
     print("Prompt：", prompt)
-    ans = generate_chat(prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p)
+    ans = generate_chat(prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p, use_lora=use_lora)
     print("Ans：", ans)
 
     history = history + [
@@ -1368,11 +1397,12 @@ def main():
     parser.add_argument("--cache_dir", default=r"D:\CardiacRate\hf_cache")
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument("--share", action="store_true")
+    parser.add_argument("--load_in_4bit", action="store_true", help="Load base model in 4-bit (bitsandbytes) to cut RAM/VRAM use")
     args = parser.parse_args()
 
     os.makedirs(args.cache_dir, exist_ok=True)
     print("Loading model...")
-    load_model(args.base_model, args.lora_dir, args.cache_dir, args.trust_remote_code)
+    load_model(args.base_model, args.lora_dir, args.cache_dir, args.trust_remote_code, args.load_in_4bit)
 
     global FACTS_INDEX
     FACTS_INDEX = build_index(args.facts_dir)
@@ -1380,7 +1410,7 @@ def main():
     ct_facts_dir_state_value = args.facts_dir
     initial_cfg = get_dataset_config(DEFAULT_DATASET, ct_facts_dir_state_value)
 
-    with gr.Blocks(title="Cardiac Agent (CT + ACDC)") as demo:
+    with gr.Blocks(title="Cardiac Agent") as demo:
         gr.Markdown(
             "# Cardiac Agent (Segmentation + facts.json + LLM QA)\n"
             "Cardiac CT uses one 3D NIfTI image. ACDC processes ED and ES, "
@@ -1487,6 +1517,11 @@ def main():
 
                     with gr.Column(scale=2, min_width=520):
                         gr.Markdown("## 2) Chat (grounded on generated facts.json)")
+                        use_lora_toggle = gr.Radio(
+                            choices=["With LoRA (fine-tuned)", "Base model only"],
+                            value="With LoRA (fine-tuned)",
+                            label="Model variant",
+                        )
                         chatbot = gr.Chatbot(label="Chat", height=520)
                         user_msg = gr.Textbox(
                             label="Message",
@@ -1566,12 +1601,12 @@ def main():
 
                 send_btn.click(
                     fn=chat_respond,
-                    inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only],
+                    inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only, use_lora_toggle],
                     outputs=[chatbot, user_msg],
                 )
                 user_msg.submit(
                     fn=chat_respond,
-                    inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only],
+                    inputs=[user_msg, chatbot, out_facts_path, max_new, temp, top_p, derived_only, use_lora_toggle],
                     outputs=[chatbot, user_msg],
                 )
                 clear_btn.click(lambda: [], outputs=[chatbot])

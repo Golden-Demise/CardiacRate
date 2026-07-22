@@ -18,7 +18,7 @@
 !abandon function readme.md
 !setup.py
 !patient_education_knowledge.json
-
+!exceution_temp.md
 !*.media/
 
 # 5. 重要：再次忽略不需要的系統資料夾

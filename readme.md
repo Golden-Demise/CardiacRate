@@ -1,5 +1,5 @@
-# 基於結構化影像事實之心臟 CT 健康諮詢輔助系統
-# Evidence-Grounded LLM-Based Cardiac CT Health Consultation Assistant
+# 檢索增強大型語言模型健康諮詢系統
+# Retrieval-Augmented Large Language Models Health Consultation System
 <br>
 <div align="center">
     <img src="media/system preview.png" width="100%">

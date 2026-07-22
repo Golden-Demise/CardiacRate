@@ -78,8 +78,6 @@ The primary dataset is 100 cardiac CT volumes (`patient0001.nii.gz` – `patient
 
 ## Usage
 
-Each stage below corresponds to a step in the [Approach](#approach) pipeline. Full command variants are also kept in [`exceution_temp.md`](exceution_temp.md).
-
 ### 1. Segmentation inference
 
 ```bash

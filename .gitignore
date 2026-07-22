@@ -6,6 +6,7 @@
 
 # 3. 例外：允許所有 .py 檔案
 !*.py
+!*.md
 
 # 4. 例外：強烈建議保留的設定檔 (不然別人無法安裝你的環境)
 !.gitignore
@@ -15,6 +16,7 @@
 !CodexContent.md
 !abandon function readme.md
 !setup.py
+!patient_education_knowledge.json
 
 # 5. 重要：再次忽略不需要的系統資料夾
 # 因為第 2 步允許了所有資料夾，所以這裡要明確把「垃圾桶」再次忽略

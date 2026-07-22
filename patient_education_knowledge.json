@@ -1,0 +1,135 @@
+[
+  {
+    "id": "aortic_valve",
+    "topic": "Aortic Valve",
+    "text": "The aortic valve is the one-way valve between the heart's left ventricle and the aorta. It opens to let oxygen-rich blood flow out to the body and closes to stop blood from flowing backward into the heart.",
+    "source_title": "American Heart Association - Heart Valve Problems and Disease",
+    "source_url": "https://www.heart.org/en/health-topics/heart-valve-problems-and-disease"
+  },
+  {
+    "id": "aortic_valve_calcification",
+    "topic": "Aortic Valve Calcification",
+    "text": "Aortic valve calcification happens when calcium deposits build up on the aortic valve. It can be an early sign of valve disease, sometimes appearing before any other symptoms. It is more common in older adults, though it can occur earlier in people with a congenital valve difference such as a bicuspid aortic valve, or with certain other conditions.",
+    "source_title": "Mayo Clinic - Aortic calcification: An early sign of heart valve problems?",
+    "source_url": "https://www.mayoclinic.org/diseases-conditions/aortic-stenosis/expert-answers/aortic-valve-calcification/faq-20058525"
+  },
+  {
+    "id": "aortic_stenosis",
+    "topic": "Aortic Valve Stenosis",
+    "text": "If calcification becomes severe enough, the valve opening can narrow and restrict blood flow out of the heart, a condition called aortic valve stenosis. Confirming aortic stenosis, and how severe it is, generally requires an echocardiogram and clinical evaluation rather than a CT scan alone.",
+    "source_title": "Mayo Clinic - Aortic valve stenosis: Symptoms and causes",
+    "source_url": "https://www.mayoclinic.org/diseases-conditions/aortic-stenosis/symptoms-causes/syc-20353139"
+  },
+  {
+    "id": "echocardiography",
+    "topic": "Echocardiogram (Echo)",
+    "text": "An echocardiogram uses ultrasound (sound waves), not X-rays, to create moving images of the beating heart. It can show the size and motion of heart structures, how strongly the heart pumps, and whether a valve is too narrow (stenosis) or leaking backward (regurgitation) - information a single CT scan cannot fully provide.",
+    "source_title": "American Heart Association - Echocardiogram (Echo)",
+    "source_url": "https://www.heart.org/en/health-topics/heart-attack/diagnosing-a-heart-attack/echocardiogram"
+  },
+  {
+    "id": "agatston_score",
+    "topic": "Agatston-like Calcification Score",
+    "text": "The Agatston method was originally developed to score calcium in the coronary arteries from CT, combining each calcified spot's area and peak brightness (Hounsfield units) into a single weighted number; higher scores generally indicate more calcification. This system applies a similar, adapted scoring approach to calcification found on the aortic valve segmentation. It is a segmentation-derived, adapted score - not the original coronary artery calcium score, and not yet a clinically validated aortic valve calcium measurement.",
+    "source_title": "ScienceDirect Topics - Agatston Score overview",
+    "source_url": "https://www.sciencedirect.com/topics/medicine-and-dentistry/agatston-score"
+  },
+  {
+    "id": "myocardium",
+    "topic": "Myocardium",
+    "text": "The myocardium is the muscular wall of the heart, responsible for pumping blood with each heartbeat. Its size, shape, and thickness can be described from a single CT segmentation, but assessing dynamic function - such as how well it contracts and relaxes - generally requires imaging across the cardiac cycle, such as cine MRI or echocardiography, rather than one static CT scan.",
+    "source_title": "American Heart Association - How the Heart Works",
+    "source_url": "https://www.heart.org/en/health-topics/heart-attack/about-heart-attacks/how-the-heart-works"
+  },
+  {
+    "id": "cardiac_ct_overview",
+    "topic": "What Cardiac CT Shows",
+    "text": "Cardiac CT produces a detailed 3D, X-ray-based image of the heart, useful for viewing structure, calcification, and anatomy. It does not directly show blood-flow dynamics, valve motion over time, symptoms, or medical history, which is why some questions need additional tests or clinical context to answer fully.",
+    "source_title": "American Heart Association - Echocardiogram (Echo)",
+    "source_url": "https://www.heart.org/en/health-topics/heart-attack/diagnosing-a-heart-attack/echocardiogram"
+  },
+  {
+    "id": "questions_for_doctor",
+    "topic": "Questions You Can Ask Your Doctor",
+    "text": "If a CT report mentions calcification or a risk-related finding, useful questions to bring to a doctor include: what this specific finding means for me personally, whether an echocardiogram is recommended, what symptoms would need urgent attention, and how the finding should be monitored over time.",
+    "source_title": "American Heart Association - Testing for Heart Valve Problems",
+    "source_url": "https://www.heart.org/en/health-topics/heart-valve-problems-and-disease/getting-an-accurate-heart-valve-diagnosis/testing-for-heart-valve-problems"
+  },
+  {
+    "id": "system_limitations",
+    "topic": "What This System Cannot Do",
+    "text": "This system explains CT segmentation findings and calculated scores. It cannot diagnose disease, decide on treatment or surgery, interpret symptoms, or replace an in-person medical evaluation. Any risk-level output should be discussed with a qualified clinician alongside additional clinical information.",
+    "source_title": "System design principle (project-internal, not a clinical source)",
+    "source_url": ""
+  },
+  {
+    "id": "calcification_severity_rulebased",
+    "topic": "Calcification Severity Label",
+    "text": "Severity labels such as mild, moderate, or severe calcification produced by this system are calculated using a simple rule based on calcification volume relative to valve volume. This is a heuristic used for this project, not an established clinical severity grading system.",
+    "source_title": "System design principle (project-internal, not a clinical source)",
+    "source_url": ""
+  },
+  {
+    "id": "ejection_fraction",
+    "topic": "Ejection Fraction",
+    "text": "Ejection fraction is a percentage describing how much blood the heart's main pumping chamber (left ventricle) pushes out with each heartbeat. A typical healthy range is about 55% to 70%; a notably lower value can indicate reduced pumping function, while an unusually high value is sometimes seen with hypertrophic cardiomyopathy. It is normally estimated from imaging that captures the heart moving through a full cycle, such as cine MRI or echocardiography, not from a single static CT scan.",
+    "source_title": "American Heart Association - Ejection Fraction Heart Failure Measurement",
+    "source_url": "https://www.heart.org/en/health-topics/heart-failure/diagnosing-heart-failure/ejection-fraction-heart-failure-measurement"
+  },
+  {
+    "id": "dilated_cardiomyopathy",
+    "topic": "Dilated Cardiomyopathy (DCM)",
+    "text": "Dilated cardiomyopathy is a condition in which the heart's chambers become enlarged and the heart muscle weakens, reducing how well it pumps blood, without being explained by valve disease, high blood pressure, or blocked coronary arteries. DCM is one of the classification categories this system's ACDC cine-MRI model can predict from cardiac measurements.",
+    "source_title": "NCBI - Cardiomyopathies: An Overview",
+    "source_url": "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8303989/"
+  },
+  {
+    "id": "hypertrophic_cardiomyopathy",
+    "topic": "Hypertrophic Cardiomyopathy (HCM)",
+    "text": "Hypertrophic cardiomyopathy is a condition in which the heart muscle becomes abnormally thickened, which can make it harder for blood to leave the heart and may lead to abnormal heart rhythms. HCM is one of the classification categories this system's ACDC cine-MRI model can predict from cardiac measurements.",
+    "source_title": "Mayo Clinic - Hypertrophic Cardiomyopathy Clinic Overview",
+    "source_url": "https://www.mayoclinic.org/departments-centers/hypertrophic-cardiomyopathy-clinic/overview/ovc-20442502"
+  },
+  {
+    "id": "myocardial_infarction",
+    "topic": "Myocardial Infarction (Heart Attack)",
+    "text": "A myocardial infarction, commonly called a heart attack, happens when blood flow to part of the heart muscle is blocked, damaging or killing that tissue; the damaged area typically heals into scar tissue over several weeks. This system's ACDC classifier includes a category for prior myocardial infarction (MINF), inferred from cine-MRI measurement patterns rather than from a blood test or ECG.",
+    "source_title": "American Heart Association - What is a Heart Attack?",
+    "source_url": "https://www.heart.org/en/health-topics/heart-attack/about-heart-attacks"
+  },
+  {
+    "id": "right_ventricle_abnormality",
+    "topic": "Abnormal Right Ventricle",
+    "text": "The right ventricle is the heart chamber that pumps blood to the lungs to pick up oxygen. When it is enlarged or its function is reduced, this is generally described as right ventricular dysfunction, and it can be associated with several different underlying heart or lung conditions. This system's ACDC classifier includes a general 'abnormal right ventricle' category rather than a specific diagnosis of the underlying cause.",
+    "source_title": "Cleveland Clinic - Right-Sided Heart Failure",
+    "source_url": "https://my.clevelandclinic.org/health/diseases/21494-right-sided-heart-failure"
+  },
+  {
+    "id": "valve_regurgitation_vs_stenosis",
+    "topic": "Valve Regurgitation vs. Stenosis",
+    "text": "Stenosis means a valve has narrowed and does not open fully, restricting forward blood flow. Regurgitation means a valve does not close properly and leaks, letting blood flow backward. Both make the heart work harder, but for different reasons. This system's CT-based calcification findings relate to stenosis risk; it does not assess regurgitation, which generally requires an echocardiogram.",
+    "source_title": "American Heart Association - Problem: Heart Valve Stenosis / Heart Valve Regurgitation",
+    "source_url": "https://www.heart.org/en/health-topics/heart-valve-problems-and-disease/heart-valve-problems-and-causes/problem-heart-valve-stenosis"
+  },
+  {
+    "id": "coronary_artery_disease",
+    "topic": "Coronary Artery Disease",
+    "text": "Coronary artery disease involves narrowing or blockage of the arteries that supply the heart muscle itself, usually from plaque buildup. It is a different condition from aortic valve calcification, though the two can occur together, especially in older adults. This CT-based system does not evaluate the coronary arteries and cannot assess coronary artery disease.",
+    "source_title": "American Heart Association - Aortic Stenosis Overview",
+    "source_url": "https://www.heart.org/en/health-topics/heart-valve-problems-and-disease/heart-valve-problems-and-causes/problem-aortic-valve-stenosis"
+  },
+  {
+    "id": "aortic_stenosis_symptoms",
+    "topic": "Symptoms of Aortic Stenosis",
+    "text": "Many people with aortic valve narrowing have no noticeable symptoms until blood flow becomes significantly restricted. When symptoms occur, they can include feeling unusually tired or lightheaded, shortness of breath, or fainting; some reports note that women more often describe breathlessness and reduced exercise tolerance. This system cannot detect or confirm symptoms - it only works from CT segmentation data.",
+    "source_title": "American Heart Association - Aortic Stenosis Overview",
+    "source_url": "https://www.heart.org/en/health-topics/heart-valve-problems-and-disease/heart-valve-problems-and-causes/problem-aortic-valve-stenosis"
+  },
+  {
+    "id": "bicuspid_aortic_valve",
+    "topic": "Bicuspid Aortic Valve",
+    "text": "A bicuspid aortic valve is a congenital condition where a person is born with two valve flaps (cusps) instead of the usual three. It affects about 1% of people and can make calcification and narrowing develop earlier in life, so it is often monitored regularly over time.",
+    "source_title": "Mayo Clinic - Bicuspid Aortic Valve Overview",
+    "source_url": "https://www.mayoclinic.org/diseases-conditions/bicuspid-aortic-valve/cdc-20385577"
+  }
+]

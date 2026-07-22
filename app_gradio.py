@@ -24,6 +24,8 @@ except Exception:
     BitsAndBytesConfig = None
 from peft import PeftModel
 
+from knowledge_retrieval import load_knowledge_base, format_knowledge_block, KnowledgeBase
+
 DATASET_CONFIGS = {
     "Cardiac CT": {
         "key": "ct",
@@ -88,7 +90,9 @@ SYSTEM = (
     "Your role is to help users understand cardiac imaging analysis results in clear and natural language. You do not replace a physician and must not make unsupported diagnoses or treatment decisions."
     "Evidence rules:"
     "1. Use the provided case-specific structured facts as the only source for statements about this patient."
-    "2. General medical education may be used only to explain medical terms or the usual meaning of a finding."
+    "2. General medical education may be used only to explain medical terms or the usual meaning of a finding. "
+    "Use it only if it is provided to you in a GENERAL_KNOWLEDGE section; never invent general medical knowledge "
+    "of your own, and never let it override or contradict the case-specific FACTS."
     "3. Do not invent findings, symptoms, medical history, diagnoses, test results, or treatment recommendations."
     "4. Preserve numerical values and units exactly as provided in the facts."
     "5. Do not expose raw JSON unless the user explicitly asks for it."
@@ -128,6 +132,7 @@ SYSTEM += (
 MODEL = None
 TOKENIZER = None
 FACTS_INDEX = {}   # case_id -> facts_path
+KNOWLEDGE_BASE = None  # TF-IDF retriever over patient_education_knowledge.json
 DEVICE = None
 _VOL_CACHE = {"image": None, "label": None}
 _ACDC_RF_CACHE = {"path": None, "mtime": None, "bundle": None}
@@ -136,11 +141,109 @@ def load_facts_file(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def build_facts_block(facts_obj: dict, derived_only: bool = True) -> str:
-    """Build the patient-specific evidence block and exclude evaluation labels."""
+# Detail groups that may or may not be relevant to a given question. Each group
+# is matched against the user's question with the same TF-IDF mechanism used for
+# the general-knowledge base (knowledge_retrieval.KnowledgeBase), so that only
+# the facts.json sections relevant to the question are pulled into the prompt.
+#
+# "core" fields (case_id, structure presence, limitations, qc_flags, ...) are
+# never selected this way -- they are always included, so a question that
+# matches nothing still gets a safe, minimal answer instead of a false refusal.
+_FACTS_GROUP_DEFINITIONS = [
+    {
+        "path": "structures.myocardium",
+        "topic": "Myocardium volume and geometry",
+        "text": "myocardium heart muscle wall volume size mm3 ml bounding box slice range centroid shape",
+        "get": lambda f: f.get("structures", {}).get("myocardium", {}),
+    },
+    {
+        "path": "structures.aortic_valve",
+        "topic": "Aortic valve volume and geometry",
+        "text": "aortic valve volume size mm3 ml bounding box slice range centroid shape",
+        "get": lambda f: f.get("structures", {}).get("aortic_valve", {}),
+    },
+    {
+        "path": "structures.aortic_valve_calcification",
+        "topic": "Aortic valve calcification volume and geometry",
+        "text": "calcification aortic valve calcium volume amount extent",
+        "get": lambda f: f.get("structures", {}).get("aortic_valve_calcification", {}),
+    },
+    {
+        "path": "derived_metrics",
+        "topic": "Derived calcification and risk metrics",
+        "text": "agatston like score calcification severity ratio aortic stenosis risk level",
+        "get": lambda f: {**f.get("derived", {}), **f.get("derived_metrics", {})},
+    },
+    {
+        "path": "cardiac_function",
+        "topic": "Cardiac function measurements",
+        "text": "ejection fraction cardiac function contraction pumping ED ES myocardial measurement",
+        "get": lambda f: {**f.get("cardiac_function", {}), **f.get("myocardial_measurements", {})},
+    },
+    {
+        "path": "classification_prediction",
+        "topic": "ACDC classification prediction",
+        "text": "classification group prediction NOR MINF DCM HCM RV probability confidence machine learning",
+        "get": lambda f: f.get("classification_prediction", {}),
+    },
+    {
+        "path": "phases",
+        "topic": "ED and ES phase measurements",
+        "text": "ED ES phase end diastolic end systolic frame measurement",
+        "get": lambda f: f.get("phases", {}),
+    },
+]
+# NOTE: "answerable_findings" is deliberately NOT a retrievable group here -- it
+# is treated as a core field below. Its own description text ("summary",
+# "findings", "what can this system answer") loosely matches almost any
+# question, including vague ones like "summarize this case" or "is this
+# serious". If it stayed a candidate, those exact broad questions would clear
+# the similarity threshold on this group alone and skip the "nothing matched
+# -> include everything" safety fallback, which is precisely backwards: broad
+# questions are the ones that most need full coverage.
+
+
+def select_relevant_fact_groups(facts_obj: dict, question: str, min_score: float = 0.05) -> dict:
+    """Return {path: value} for the facts.json detail groups relevant to question.
+
+    Uses the same TF-IDF + cosine similarity mechanism as the general-knowledge
+    base, but built per-request over this case's available groups. Falls back
+    to including every available group when nothing scores above min_score,
+    so broad questions ("summarize this case") or an empty/unclear question
+    still get full coverage instead of a false "insufficient evidence" refusal.
+    """
+    candidates = []
+    for group in _FACTS_GROUP_DEFINITIONS:
+        value = group["get"](facts_obj)
+        if value:  # skip empty/absent sections (e.g. ACDC-only fields for a CT case)
+            candidates.append({"id": group["path"], "topic": group["topic"], "text": group["text"], "value": value})
+
+    if not candidates:
+        return {}
+
+    index = KnowledgeBase([{"id": c["id"], "topic": c["topic"], "text": c["text"]} for c in candidates])
+    hits = index.retrieve(question, top_k=len(candidates), min_score=min_score)
+
+    if not hits:
+        # Nothing matched confidently -> safer to include everything available.
+        selected_ids = {c["id"] for c in candidates}
+    else:
+        selected_ids = {h["id"] for h in hits}
+
+    return {c["id"]: c["value"] for c in candidates if c["id"] in selected_ids}
+
+
+def build_facts_block(facts_obj: dict, derived_only: bool = True, question: str = None) -> str:
+    """Build the patient-specific evidence block and exclude evaluation labels.
+
+    When question is provided, only the core (always-safe) fields plus the
+    facts.json detail groups relevant to that question are included, instead
+    of dumping every section on every turn. When question is None, falls back
+    to the original behavior (include every section) for backward compatibility.
+    """
     case_id = facts_obj.get("case_id") or facts_obj.get("patient_id", "")
 
-    payload = {
+    core_payload = {
         "case_id": case_id,
         "patient_id": facts_obj.get("patient_id", case_id),
         "modality": facts_obj.get("modality", "cardiac_ct"),
@@ -149,17 +252,41 @@ def build_facts_block(facts_obj: dict, derived_only: bool = True) -> str:
         "image_info": facts_obj.get("image_info", {}),
         "image_shape": facts_obj.get("image_shape"),
         "spacing_mm": facts_obj.get("spacing_mm"),
-        "structures": facts_obj.get("structures", {}),
-        "phases": facts_obj.get("phases", {}),
-        "cardiac_function": facts_obj.get("cardiac_function", {}),
-        "myocardial_measurements": facts_obj.get("myocardial_measurements", {}),
-        "derived": facts_obj.get("derived", {}),
-        "derived_metrics": facts_obj.get("derived_metrics", {}),
-        "classification_prediction": facts_obj.get("classification_prediction", {}),
+        "structures_presence": {
+            name: value.get("present") for name, value in facts_obj.get("structures", {}).items()
+        },
         "answerable_findings": facts_obj.get("answerable_findings", {}),
         "limitations": facts_obj.get("limitations", []),
         "qc_flags": facts_obj.get("qc_flags", []),
     }
+
+    if question is None:
+        # Backward-compatible path: everything, unfiltered.
+        payload = {
+            **core_payload,
+            "structures": facts_obj.get("structures", {}),
+            "phases": facts_obj.get("phases", {}),
+            "cardiac_function": facts_obj.get("cardiac_function", {}),
+            "myocardial_measurements": facts_obj.get("myocardial_measurements", {}),
+            "derived": facts_obj.get("derived", {}),
+            "derived_metrics": facts_obj.get("derived_metrics", {}),
+            "classification_prediction": facts_obj.get("classification_prediction", {}),
+        }
+        payload.pop("structures_presence", None)
+    else:
+        # We still need full structure info (not just presence) if that group
+        # is selected as relevant, so re-attach full "structures" when any
+        # structures.* group was picked.
+        relevant = select_relevant_fact_groups(facts_obj, question)
+        payload = dict(core_payload)
+        structures_full = {}
+        for path, value in relevant.items():
+            if path.startswith("structures."):
+                structures_full[path.split(".", 1)[1]] = value
+            else:
+                payload[path] = value
+        if structures_full:
+            payload["structures"] = structures_full
 
     # evaluation_metadata intentionally stays outside the LLM prompt. In ACDC,
     # this contains the dataset Group ground-truth label and must not leak into QA.
@@ -1292,13 +1419,27 @@ def messages_to_turns(history_messages):
                 pending_user = None
     return turns
 
-def build_chat_prompt(facts_block: str, history_messages, user_msg: str, keep_last_k: int = 2) -> str:
+def build_chat_prompt(facts_block: str, history_messages, user_msg: str, keep_last_k: int = 2, knowledge_block: str = "") -> str:
     turns = messages_to_turns(history_messages)
     turns = turns[-keep_last_k:] if turns else []
 
     history_text = ""
     for u, a in turns:
         history_text += f"Previous Question: {u}\nPrevious Answer: {a}\n\n"
+
+    knowledge_section = ""
+    instruction = (
+        "Answer the question using only the FACTS for anything specific to this patient. "
+        "Write a natural-language answer. Do not output raw JSON or dictionaries."
+    )
+    if knowledge_block:
+        knowledge_section = f"GENERAL_KNOWLEDGE (not case-specific; use only to explain terms):\n{knowledge_block}\n\n"
+        instruction = (
+            "Answer the question using only the FACTS for anything specific to this patient. "
+            "You may use GENERAL_KNOWLEDGE only to explain general medical terms or typical meaning, "
+            "and briefly note the source when you do. GENERAL_KNOWLEDGE must never override or contradict FACTS. "
+            "Write a natural-language answer. Do not output raw JSON or dictionaries."
+        )
 
     return (
         f"### System:\n"
@@ -1309,9 +1450,9 @@ def build_chat_prompt(facts_block: str, history_messages, user_msg: str, keep_la
         f"{user_msg}\n\n"
         f"FACTS:\n"
         f"{facts_block}\n\n"
+        f"{knowledge_section}"
         f"Instruction:\n"
-        f"Answer the question using only the FACTS. "
-        f"Write a natural-language answer. Do not output raw JSON or dictionaries.\n\n"
+        f"{instruction}\n\n"
         f"### Assistant:\n"
     )
 
@@ -1375,9 +1516,16 @@ def chat_respond(user_msg, history, facts_path, max_new_tokens, temperature, top
         return history, ""
 
     facts_obj = load_facts_file(facts_path)
-    facts_block = build_facts_block(facts_obj, derived_only=derived_only)
+    facts_block = build_facts_block(facts_obj, derived_only=derived_only, question=user_msg)
 
-    prompt = build_chat_prompt(facts_block, history, user_msg, keep_last_k=4)
+    knowledge_block = ""
+    if KNOWLEDGE_BASE is not None:
+        knowledge_hits = KNOWLEDGE_BASE.retrieve(user_msg, top_k=2)
+        knowledge_block = format_knowledge_block(knowledge_hits)
+        if knowledge_hits:
+            print("Retrieved knowledge：", [h["topic"] for h in knowledge_hits])
+
+    prompt = build_chat_prompt(facts_block, history, user_msg, keep_last_k=4, knowledge_block=knowledge_block)
     print("Prompt：", prompt)
     ans = generate_chat(prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p, use_lora=use_lora)
     print("Ans：", ans)
@@ -1398,14 +1546,17 @@ def main():
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument("--share", action="store_true")
     parser.add_argument("--load_in_4bit", action="store_true", help="Load base model in 4-bit (bitsandbytes) to cut RAM/VRAM use")
+    parser.add_argument("--knowledge_json", default=r"D:\CardiacRate\patient_education_knowledge.json",
+                         help="Path to the patient-education knowledge base used for general-knowledge retrieval")
     args = parser.parse_args()
 
     os.makedirs(args.cache_dir, exist_ok=True)
     print("Loading model...")
     load_model(args.base_model, args.lora_dir, args.cache_dir, args.trust_remote_code, args.load_in_4bit)
 
-    global FACTS_INDEX
+    global FACTS_INDEX, KNOWLEDGE_BASE
     FACTS_INDEX = build_index(args.facts_dir)
+    KNOWLEDGE_BASE = load_knowledge_base(args.knowledge_json)
 
     ct_facts_dir_state_value = args.facts_dir
     initial_cfg = get_dataset_config(DEFAULT_DATASET, ct_facts_dir_state_value)
@@ -1517,11 +1668,6 @@ def main():
 
                     with gr.Column(scale=2, min_width=520):
                         gr.Markdown("## 2) Chat (grounded on generated facts.json)")
-                        use_lora_toggle = gr.Radio(
-                            choices=["With LoRA (fine-tuned)", "Base model only"],
-                            value="With LoRA (fine-tuned)",
-                            label="Model variant",
-                        )
                         chatbot = gr.Chatbot(label="Chat", height=520)
                         user_msg = gr.Textbox(
                             label="Message",
@@ -1532,10 +1678,15 @@ def main():
                             send_btn = gr.Button("Send", variant="primary")
                             clear_btn = gr.Button("Clear chat")
                         with gr.Row():
-                            max_new = gr.Slider(32, 512, value=128, step=8, label="max_new_tokens")
+                            max_new = gr.Slider(32, 512, value=512, step=8, label="max_new_tokens")
                             temp = gr.Slider(0.0, 1.0, value=0.0, step=0.05, label="temperature")
                             top_p = gr.Slider(0.1, 1.0, value=1.0, step=0.05, label="top_p")
                         derived_only = gr.Checkbox(value=False, label="Use compact facts only")
+                        use_lora_toggle = gr.Radio(
+                            choices=["With LoRA (fine-tuned)", "Base model only"],
+                            value="Base model only",
+                            label="Model variant",
+                        )
 
                 dataset_selector.change(
                     fn=on_dataset_change,

@@ -91,3 +91,11 @@ python app_gradio.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_dir D:\Cardiac
 
 * Segmentation backbone: `unetcnx_a1`
 * Base LLMs used for QA generation, augmentation, and fine-tuning: [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct), [Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)
+
+## Licenses
+
+### Main License
+This project is licensed under the MIT License - see [LICENSE_MIT.md](LICENSE_MIT.md) for details.
+
+### Additional Licenses
+Some components may be distributed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License - see [LICENSE.CC_BY_NC_SA_4.0.md](LICENSE.CC_BY_NC_SA_4.0.md) for details.

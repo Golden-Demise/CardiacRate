@@ -178,6 +178,3 @@ python app_gradio.py --base_model mistralai/Mistral-7B-Instruct-v0.3 --lora_dir 
 
 ### Main License
 This project is licensed under the MIT License - see [LICENSE_MIT.md](LICENSE_MIT.md) for details.
-
-### Additional Licenses
-Some components may be distributed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License - see [LICENSE.CC_BY_NC_SA_4.0.md](LICENSE.CC_BY_NC_SA_4.0.md) for details.
